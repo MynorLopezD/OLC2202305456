@@ -1,47 +1,46 @@
 <?php
 
 /*
- * Generated from antlr/grammar/Lenguaje.g4 by ANTLR 4.13.1
+ * Generated from antlr/grammar/OLC.g4 by ANTLR 4.13.1
  */
-
 
 use Antlr\Antlr4\Runtime\ParserRuleContext;
 use Antlr\Antlr4\Runtime\Tree\ErrorNode;
 use Antlr\Antlr4\Runtime\Tree\TerminalNode;
 
 /**
- * This class provides an empty implementation of {@see LenguajeListener},
+ * This class provides an empty implementation of {@see OLCListener},
  * which can be extended to create a listener which only needs to handle a subset
  * of the available methods.
  */
-class LenguajeBaseListener implements LenguajeListener
+class OLCBaseListener implements OLCListener
 {
 	/**
 	 * {@inheritdoc}
 	 *
 	 * The default implementation does nothing.
 	 */
-	public function enterProg(Context\ProgContext $context): void {}
+	public function enterProgram(Context\ProgramContext $context): void {}
 
 	/**
 	 * {@inheritdoc}
 	 *
 	 * The default implementation does nothing.
 	 */
-	public function exitProg(Context\ProgContext $context): void {}
+	public function exitProgram(Context\ProgramContext $context): void {}
 	/**
 	 * {@inheritdoc}
 	 *
 	 * The default implementation does nothing.
 	 */
-	public function enterExpr(Context\ExprContext $context): void {}
+	public function enterStatement(Context\StatementContext $context): void {}
 
 	/**
 	 * {@inheritdoc}
 	 *
 	 * The default implementation does nothing.
 	 */
-	public function exitExpr(Context\ExprContext $context): void {}
+	public function exitStatement(Context\StatementContext $context): void {}
 
 	/**
 	 * {@inheritdoc}

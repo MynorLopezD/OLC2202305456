@@ -6,6 +6,9 @@ $vendorDir = dirname(__DIR__);
 $baseDir = dirname($vendorDir);
 
 return array(
+    'ANTLR\\OLCBaseListener' => $baseDir . '/antlr/generated/OLCBaseListener.php',
+    'ANTLR\\OLCBaseVisitor' => $baseDir . '/antlr/generated/OLCBaseVisitor.php',
+    'ANTLR\\OLCVisitor' => $baseDir . '/antlr/generated/OLCVisitor.php',
     'Antlr\\Antlr4\\Runtime\\Atn\\ATN' => $vendorDir . '/antlr/antlr4-php-runtime/src/Atn/ATN.php',
     'Antlr\\Antlr4\\Runtime\\Atn\\ATNConfig' => $vendorDir . '/antlr/antlr4-php-runtime/src/Atn/ATNConfig.php',
     'Antlr\\Antlr4\\Runtime\\Atn\\ATNConfigSet' => $vendorDir . '/antlr/antlr4-php-runtime/src/Atn/ATNConfigSet.php',
@@ -138,6 +141,8 @@ return array(
     'Antlr\\Antlr4\\Runtime\\Vocabulary' => $vendorDir . '/antlr/antlr4-php-runtime/src/Vocabulary.php',
     'Antlr\\Antlr4\\Runtime\\VocabularyImpl' => $vendorDir . '/antlr/antlr4-php-runtime/src/VocabularyImpl.php',
     'Antlr\\Antlr4\\Runtime\\WritableToken' => $vendorDir . '/antlr/antlr4-php-runtime/src/WritableToken.php',
+    'App\\Http\\Controllers\\AnalizadorController' => $baseDir . '/app/Http/Controllers/AnalizadorController.php',
+    'App\\Http\\Controllers\\CompilerController' => $baseDir . '/app/Http/Controllers/CompilerController.php',
     'App\\Http\\Controllers\\Controller' => $baseDir . '/app/Http/Controllers/Controller.php',
     'App\\Models\\User' => $baseDir . '/app/Models/User.php',
     'App\\Providers\\AppServiceProvider' => $baseDir . '/app/Providers/AppServiceProvider.php',
