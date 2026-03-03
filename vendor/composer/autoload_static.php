@@ -543,6 +543,9 @@ class ComposerStaticInitc514d8f7b9fc5970bdd94287905ef584
     public static $classMap = array (
         'ANTLR\\OLCBaseListener' => __DIR__ . '/../..' . '/antlr/generated/OLCBaseListener.php',
         'ANTLR\\OLCBaseVisitor' => __DIR__ . '/../..' . '/antlr/generated/OLCBaseVisitor.php',
+        'ANTLR\\OLCLexer' => __DIR__ . '/../..' . '/antlr/generated/OLCLexer.php',
+        'ANTLR\\OLCListener' => __DIR__ . '/../..' . '/antlr/generated/OLCListener.php',
+        'ANTLR\\OLCParser' => __DIR__ . '/../..' . '/antlr/generated/OLCParser.php',
         'ANTLR\\OLCVisitor' => __DIR__ . '/../..' . '/antlr/generated/OLCVisitor.php',
         'Antlr\\Antlr4\\Runtime\\Atn\\ATN' => __DIR__ . '/..' . '/antlr/antlr4-php-runtime/src/Atn/ATN.php',
         'Antlr\\Antlr4\\Runtime\\Atn\\ATNConfig' => __DIR__ . '/..' . '/antlr/antlr4-php-runtime/src/Atn/ATNConfig.php',

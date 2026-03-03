@@ -29,7 +29,7 @@ class CompilerController extends Controller
             $tree = $parser->program();
 
             return response()->json([
-                "resultado" => $tree->toStringTree($parser)
+                "resultado" => $tree->toStringTree($parser->getRuleNames())
             ]);
 
         } catch (\Exception $e) {

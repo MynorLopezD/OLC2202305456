@@ -8,6 +8,9 @@ $baseDir = dirname($vendorDir);
 return array(
     'ANTLR\\OLCBaseListener' => $baseDir . '/antlr/generated/OLCBaseListener.php',
     'ANTLR\\OLCBaseVisitor' => $baseDir . '/antlr/generated/OLCBaseVisitor.php',
+    'ANTLR\\OLCLexer' => $baseDir . '/antlr/generated/OLCLexer.php',
+    'ANTLR\\OLCListener' => $baseDir . '/antlr/generated/OLCListener.php',
+    'ANTLR\\OLCParser' => $baseDir . '/antlr/generated/OLCParser.php',
     'ANTLR\\OLCVisitor' => $baseDir . '/antlr/generated/OLCVisitor.php',
     'Antlr\\Antlr4\\Runtime\\Atn\\ATN' => $vendorDir . '/antlr/antlr4-php-runtime/src/Atn/ATN.php',
     'Antlr\\Antlr4\\Runtime\\Atn\\ATNConfig' => $vendorDir . '/antlr/antlr4-php-runtime/src/Atn/ATNConfig.php',
