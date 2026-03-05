@@ -451,6 +451,32 @@ class OLCBaseListener implements OLCListener
 	 *
 	 * The default implementation does nothing.
 	 */
+	public function enterFmtPrintlnCall(Context\FmtPrintlnCallContext $context): void {}
+
+	/**
+	 * {@inheritdoc}
+	 *
+	 * The default implementation does nothing.
+	 */
+	public function exitFmtPrintlnCall(Context\FmtPrintlnCallContext $context): void {}
+	/**
+	 * {@inheritdoc}
+	 *
+	 * The default implementation does nothing.
+	 */
+	public function enterBuiltinCall(Context\BuiltinCallContext $context): void {}
+
+	/**
+	 * {@inheritdoc}
+	 *
+	 * The default implementation does nothing.
+	 */
+	public function exitBuiltinCall(Context\BuiltinCallContext $context): void {}
+	/**
+	 * {@inheritdoc}
+	 *
+	 * The default implementation does nothing.
+	 */
 	public function enterLiteral(Context\LiteralContext $context): void {}
 
 	/**

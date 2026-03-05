@@ -3,40 +3,34 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
-
-use Antlr\Antlr4\Runtime\InputStream;
-use Antlr\Antlr4\Runtime\CommonTokenStream;
-
-use ANTLR\OLCLexer;
-use ANTLR\OLCParser;
+use App\Services\InterpreterService;
 
 class CompilerController extends Controller
 {
+
     public function analizar(Request $request)
     {
+
         $codigo = $request->input('codigo');
 
         try {
 
-            // ✅ CREACIÓN CORRECTA DEL INPUT
-            $input = InputStream::fromString($codigo);
+            $interpreter = new InterpreterService();
 
-            $lexer = new OLCLexer($input);
-            $tokens = new CommonTokenStream($lexer);
-
-            $parser = new OLCParser($tokens);
-
-            $tree = $parser->program();
+            $result = $interpreter->run($codigo);
 
             return response()->json([
-                "resultado" => $tree->toStringTree($parser->getRuleNames())
+                "resultado"=>$result["output"],
+                "errores"=>$result["errors"],
+                "tabla"=>$result["symbols"]
             ]);
 
         } catch (\Exception $e) {
 
             return response()->json([
-                "resultado" => "Error:\n" . $e->getMessage()
+                "resultado"=>"Error: ".$e->getMessage()
             ]);
         }
     }
+
 }

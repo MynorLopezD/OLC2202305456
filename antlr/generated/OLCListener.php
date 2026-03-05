@@ -343,6 +343,26 @@ interface OLCListener extends ParseTreeListener {
 	 */
 	public function exitPrimaryExpr(Context\PrimaryExprContext $context): void;
 	/**
+	 * Enter a parse tree produced by {@see OLCParser::fmtPrintlnCall()}.
+	 * @param $context The parse tree.
+	 */
+	public function enterFmtPrintlnCall(Context\FmtPrintlnCallContext $context): void;
+	/**
+	 * Exit a parse tree produced by {@see OLCParser::fmtPrintlnCall()}.
+	 * @param $context The parse tree.
+	 */
+	public function exitFmtPrintlnCall(Context\FmtPrintlnCallContext $context): void;
+	/**
+	 * Enter a parse tree produced by {@see OLCParser::builtinCall()}.
+	 * @param $context The parse tree.
+	 */
+	public function enterBuiltinCall(Context\BuiltinCallContext $context): void;
+	/**
+	 * Exit a parse tree produced by {@see OLCParser::builtinCall()}.
+	 * @param $context The parse tree.
+	 */
+	public function exitBuiltinCall(Context\BuiltinCallContext $context): void;
+	/**
 	 * Enter a parse tree produced by {@see OLCParser::literal()}.
 	 * @param $context The parse tree.
 	 */

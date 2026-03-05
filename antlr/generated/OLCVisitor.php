@@ -311,6 +311,24 @@ interface OLCVisitor extends ParseTreeVisitor
 	public function visitPrimaryExpr(Context\PrimaryExprContext $context);
 
 	/**
+	 * Visit a parse tree produced by {@see OLCParser::fmtPrintlnCall()}.
+	 *
+	 * @param Context\FmtPrintlnCallContext $context The parse tree.
+	 *
+	 * @return mixed The visitor result.
+	 */
+	public function visitFmtPrintlnCall(Context\FmtPrintlnCallContext $context);
+
+	/**
+	 * Visit a parse tree produced by {@see OLCParser::builtinCall()}.
+	 *
+	 * @param Context\BuiltinCallContext $context The parse tree.
+	 *
+	 * @return mixed The visitor result.
+	 */
+	public function visitBuiltinCall(Context\BuiltinCallContext $context);
+
+	/**
 	 * Visit a parse tree produced by {@see OLCParser::literal()}.
 	 *
 	 * @param Context\LiteralContext $context The parse tree.

@@ -191,7 +191,7 @@ exp_list
 
 /*
 |--------------------------------------------------------------------------
-| EXPRESIONES CON PRECEDENCIA
+| EXPRESIONES
 |--------------------------------------------------------------------------
 */
 
@@ -226,8 +226,8 @@ multiplicativeExpr
 unaryExpr
     : '!' unaryExpr
     | '-' unaryExpr
-    | '*' unaryExpr          // desreferenciación
-    | '&' unaryExpr          // referencia
+    | '*' unaryExpr
+    | '&' unaryExpr
     | primaryExpr
     ;
 
@@ -243,8 +243,27 @@ primaryExpr
     | NIL
     | '(' expression ')'
     | primaryExpr '[' expression ']'
-    | primaryExpr '(' exp_list? ')'      // llamada a función
+    | primaryExpr '(' exp_list? ')'
+    | fmtPrintlnCall
+    | builtinCall
     | arrayLiteral
+    ;
+
+/*
+|--------------------------------------------------------------------------
+| BUILT-IN FUNCTIONS
+|--------------------------------------------------------------------------
+*/
+
+fmtPrintlnCall
+    : FMT '.' PRINTLN '(' exp_list? ')'
+    ;
+
+builtinCall
+    : LEN '(' expression ')'
+    | NOW '(' ')'
+    | SUBSTR '(' expression ',' expression ',' expression ')'
+    | TYPEOF '(' expression ')'
     ;
 
 /*
@@ -328,6 +347,25 @@ BREAK    : 'break';
 CONTINUE : 'continue';
 RETURN   : 'return';
 NIL      : 'nil';
+
+/*
+|--------------------------------------------------------------------------
+| BUILTIN TOKENS
+|--------------------------------------------------------------------------
+*/
+
+FMT     : 'fmt';
+PRINTLN : 'Println';
+LEN     : 'len';
+NOW     : 'now';
+SUBSTR  : 'substr';
+TYPEOF  : 'typeOf';
+
+/*
+|--------------------------------------------------------------------------
+| TIPOS
+|--------------------------------------------------------------------------
+*/
 
 INT32   : 'int32';
 FLOAT32 : 'float32';
