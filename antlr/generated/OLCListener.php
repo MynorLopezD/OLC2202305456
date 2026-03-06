@@ -33,6 +33,16 @@ interface OLCListener extends ParseTreeListener {
 	 */
 	public function exitDeclaration(Context\DeclarationContext $context): void;
 	/**
+	 * Enter a parse tree produced by {@see OLCParser::exprStmt()}.
+	 * @param $context The parse tree.
+	 */
+	public function enterExprStmt(Context\ExprStmtContext $context): void;
+	/**
+	 * Exit a parse tree produced by {@see OLCParser::exprStmt()}.
+	 * @param $context The parse tree.
+	 */
+	public function exitExprStmt(Context\ExprStmtContext $context): void;
+	/**
 	 * Enter a parse tree produced by {@see OLCParser::functionDcl()}.
 	 * @param $context The parse tree.
 	 */

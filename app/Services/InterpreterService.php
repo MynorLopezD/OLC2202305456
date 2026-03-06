@@ -37,24 +37,20 @@ class InterpreterService
         // -----------------------------
         // ANALISIS SEMANTICO
         // -----------------------------
-
         $semantic = new SemanticVisitor($symbolTable, $errors);
-        $semantic->visit($tree);
+        $semantic->visit(tree: $tree);
 
         // -----------------------------
         // INTERPRETACION
         // -----------------------------
-
         $interpreter = new InterpreterVisitor($symbolTable);
 
-        //$interpreter->visit($tree);
-
+        // Ejecutar desde el nodo raíz del árbol de programa
         $interpreter->executeMain($tree);
 
         // -----------------------------
         // TOKENS
         // -----------------------------
-
         $tokens->fill();
 
         return [

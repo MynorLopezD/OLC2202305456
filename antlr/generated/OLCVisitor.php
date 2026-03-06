@@ -32,6 +32,15 @@ interface OLCVisitor extends ParseTreeVisitor
 	public function visitDeclaration(Context\DeclarationContext $context);
 
 	/**
+	 * Visit a parse tree produced by {@see OLCParser::exprStmt()}.
+	 *
+	 * @param Context\ExprStmtContext $context The parse tree.
+	 *
+	 * @return mixed The visitor result.
+	 */
+	public function visitExprStmt(Context\ExprStmtContext $context);
+
+	/**
 	 * Visit a parse tree produced by {@see OLCParser::functionDcl()}.
 	 *
 	 * @param Context\FunctionDclContext $context The parse tree.

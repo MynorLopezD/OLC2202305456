@@ -22,6 +22,7 @@ declaration
     | constDcl
     | functionDcl
     | assignmentStmt
+    | exprStmt
     | ifStmt
     | switchStmt
     | forStmt
@@ -29,6 +30,10 @@ declaration
     | continueStmt
     | returnStmt
     | block
+    ;
+
+exprStmt
+    : expression
     ;
 
 /*

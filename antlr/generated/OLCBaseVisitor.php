@@ -42,6 +42,17 @@ class OLCBaseVisitor extends AbstractParseTreeVisitor implements OLCVisitor
 	 * The default implementation returns the result of calling
 	 * {@see self::visitChildren()} on `context`.
 	 */
+	public function visitExprStmt(Context\ExprStmtContext $context)
+	{
+	    return $this->visitChildren($context);
+	}
+
+	/**
+	 * {@inheritdoc}
+	 *
+	 * The default implementation returns the result of calling
+	 * {@see self::visitChildren()} on `context`.
+	 */
 	public function visitFunctionDcl(Context\FunctionDclContext $context)
 	{
 	    return $this->visitChildren($context);

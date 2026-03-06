@@ -48,6 +48,19 @@ class OLCBaseListener implements OLCListener
 	 *
 	 * The default implementation does nothing.
 	 */
+	public function enterExprStmt(Context\ExprStmtContext $context): void {}
+
+	/**
+	 * {@inheritdoc}
+	 *
+	 * The default implementation does nothing.
+	 */
+	public function exitExprStmt(Context\ExprStmtContext $context): void {}
+	/**
+	 * {@inheritdoc}
+	 *
+	 * The default implementation does nothing.
+	 */
 	public function enterFunctionDcl(Context\FunctionDclContext $context): void {}
 
 	/**
