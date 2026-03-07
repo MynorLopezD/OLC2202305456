@@ -26,6 +26,16 @@
         font-weight: bold;
         margin-bottom: 10px;
     }
+
+    #console {
+        height: 200px;
+        background: black;
+        color: #00ff00;
+        font-family: monospace;
+        overflow-y: auto;
+        padding: 10px;
+        white-space: pre-wrap; /* <-- agrega esto */
+    }
 </style>
 @endpush
 
@@ -219,9 +229,8 @@
             });
 
             const data = await response.json();
-
-            document.getElementById('console')
-                .innerHTML += data.resultado + '<br>';
+            const consola = document.getElementById('console');
+            consola.innerText += data.resultado;
 
         } catch (error) {
 
