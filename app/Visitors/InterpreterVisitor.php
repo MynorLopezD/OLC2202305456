@@ -299,15 +299,13 @@ class InterpreterVisitor extends OLCBaseVisitor
     {
         // Caso: primaryExpr ('++' | '--')
         if ($ctx->getChildCount() == 2) {
-            $op   = $ctx->getChild(1)->getText();
-            $name = $ctx->primaryExpr()->getText();
-            $curr = $this->getVar($name);
+            $op       = $ctx->getChild(1)->getText();
+            $primary  = $ctx->primaryExpr();
+            $name     = $primary->getText();
+            $curr     = $this->getVar($name);
 
-            if ($op === '++') {
-                $this->setVar($name, $curr + 1);
-            } else {
-                $this->setVar($name, $curr - 1);
-            }
+            if ($op === '++') $this->setVar($name, $curr + 1);
+            else              $this->setVar($name, $curr - 1);
             return;
         }
 
@@ -316,17 +314,31 @@ class InterpreterVisitor extends OLCBaseVisitor
         $op         = $ctx->assignOp()->getText();
         $value      = $this->visit($ctx->expression());
 
-        // Acceso a arreglo: arr[i] = value
-        if ($primaryCtx->expression()) {
-            $arrName = $primaryCtx->primaryExpr()->getText();
-            $index   = $this->visit($primaryCtx->expression());
-            $arr     = $this->getVar($arrName);
+        // Detectar acceso indexado: puede ser arr[i] o mat[i][j] (anidado)
+        $indices = [];
+        $current = $primaryCtx;
 
-            if (is_array($arr)) {
-                $curr = $arr[$index] ?? 0;
-                $arr[$index] = $this->applyAssignOp($curr, $op, $value);
-                $this->setVar($arrName, $arr);
+        // Desempacar cadena de accesos: mat[i][j] => nombre=mat, indices=[i,j]
+        while ($current->getChildCount() === 4 && $current->getChild(1)->getText() === '[') {
+            array_unshift($indices, (int)$this->visit($current->expression()));
+            $current = $current->primaryExpr();
+        }
+
+        if (!empty($indices)) {
+            // $current ahora es el nodo hoja con el nombre de la variable
+            $varName = $current->getText();
+            $arr     = $this->getVar($varName);
+
+            // Navegar hasta el penúltimo nivel y asignar
+            $ref = &$arr;
+            for ($i = 0; $i < count($indices) - 1; $i++) {
+                $ref = &$ref[$indices[$i]];
             }
+            $lastIdx     = $indices[count($indices) - 1];
+            $curr        = $ref[$lastIdx] ?? 0;
+            $ref[$lastIdx] = $this->applyAssignOp($curr, $op, $value);
+
+            $this->setVar($varName, $arr);
             return;
         }
 
@@ -557,7 +569,7 @@ class InterpreterVisitor extends OLCBaseVisitor
             }
         }
 
-        $this->output .= implode(" ", $values) . "\n";
+        $this->output .= implode(" ", $values) . "\n"; // sin cambios
     }
 
     /*
@@ -726,18 +738,22 @@ class InterpreterVisitor extends OLCBaseVisitor
 
     public function visitPrimaryExpr($ctx)
     {
+        $childCount = $ctx->getChildCount();
+
         // Acceso a arreglo: primaryExpr '[' expression ']'
-        if ($ctx->getChildCount() === 4 && $ctx->getChild(1)->getText() === '[') {
+        // La gramática lo produce como (primaryExpr '[' expression ']')
+        if ($childCount === 4 && $ctx->getChild(1)->getText() === '[') {
             $arr   = $this->visit($ctx->primaryExpr());
-            $index = $this->visit($ctx->expression());
-            if (is_array($arr) && isset($arr[$index])) {
+            $index = (int)$this->visit($ctx->expression());
+            if (is_array($arr) && array_key_exists($index, $arr)) {
                 return $arr[$index];
             }
-            return null;
+            // índice fuera de rango => valor por defecto es 0
+            return 0;
         }
 
         // Llamada a función: primaryExpr '(' exp_list? ')'
-        if ($ctx->getChildCount() >= 3 && $ctx->getChild(1)->getText() === '(') {
+        if ($childCount >= 3 && $ctx->getChild(1)->getText() === '(') {
             $name = $ctx->primaryExpr()->getText();
             $args = [];
             if ($ctx->exp_list()) {
@@ -758,6 +774,11 @@ class InterpreterVisitor extends OLCBaseVisitor
             return $this->visit($ctx->builtinCall());
         }
 
+        // Array literal  — tiene que ir ANTES de literal e IDENTIFIER
+        if ($ctx->arrayLiteral()) {
+            return $this->visit($ctx->arrayLiteral());
+        }
+
         // Literal
         if ($ctx->literal()) {
             return $this->visit($ctx->literal());
@@ -772,11 +793,6 @@ class InterpreterVisitor extends OLCBaseVisitor
         // Expresión entre paréntesis
         if ($ctx->expression()) {
             return $this->visit($ctx->expression());
-        }
-
-        // Array literal
-        if ($ctx->arrayLiteral()) {
-            return $this->visit($ctx->arrayLiteral());
         }
 
         // NIL
@@ -799,11 +815,25 @@ class InterpreterVisitor extends OLCBaseVisitor
 
         if ($ctx->elementList()) {
             foreach ($ctx->elementList()->element() as $el) {
+                // Un element puede ser arrayLiteral (fila de una matriz) o expression
                 if ($el->arrayLiteral()) {
                     $elements[] = $this->visit($el->arrayLiteral());
                 } else {
-                    $elements[] = $this->visit($el->expression());
+                    $val = $this->visit($el->expression());
+                    $elements[] = $val;
                 }
+            }
+        }
+
+        // Si el array literal fue declarado vacío pero tiene un tipo con tamaño,
+        // los elementos faltantes se rellenan con el valor por defecto.
+        // El tipo está en el nodo padre (type → arrayType → '[' expression ']' type)
+        $typeCtx = $ctx->type();
+        if ($typeCtx && $typeCtx->arrayType()) {
+            $size      = (int)$this->visit($typeCtx->arrayType()->expression());
+            $innerType = $typeCtx->arrayType()->type()->getText();
+            while (count($elements) < $size) {
+                $elements[] = $this->defaultValue($innerType);
             }
         }
 
@@ -852,10 +882,24 @@ class InterpreterVisitor extends OLCBaseVisitor
     }
 
     /**
-     * Valor por defecto según el tipo.
+     * Valor por defecto segun el tipo.
+     * Soporta tipos simples y arrays como [5]int32 o [3][3]int32.
      */
     private function defaultValue($type)
     {
+        if ($type === null) return null;
+
+        // Tipo array: [N]innerType  (e.g. [5]int32, [3][3]int32)
+        if (preg_match('/^\[(\d+)\](.+)$/', $type, $m)) {
+            $size      = (int)$m[1];
+            $innerType = $m[2];
+            $arr = [];
+            for ($i = 0; $i < $size; $i++) {
+                $arr[$i] = $this->defaultValue($innerType);
+            }
+            return $arr;
+        }
+
         switch ($type) {
             case 'int32':   return 0;
             case 'float32': return 0.0;
