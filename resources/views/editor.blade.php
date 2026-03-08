@@ -213,9 +213,6 @@
                 'meta[name="csrf-token"]'
             ).getAttribute('content');
 
-        document.getElementById('console')
-            .innerHTML += '> Enviando código al servidor...<br>';
-
         try {
 
             const response = await fetch('/analizar', {

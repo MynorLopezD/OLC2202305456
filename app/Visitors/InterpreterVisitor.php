@@ -660,6 +660,12 @@ class InterpreterVisitor extends OLCBaseVisitor
             $right = $this->visit($ctx->relationalExpr($i));
             $op    = $ctx->getChild(($i * 2) - 1)->getText();
 
+            // nil comparado con cualquier cosa devuelve nil (<nil>)
+            if (is_null($result) || is_null($right)) {
+                $result = null;
+                continue;
+            }
+
             if ($op === '==') $result = ($result == $right);
             if ($op === '!=') $result = ($result != $right);
         }
@@ -855,7 +861,21 @@ class InterpreterVisitor extends OLCBaseVisitor
                 $raw
             );
         }
-        if ($ctx->RUNE_LITERAL())   return $ctx->getText()[1]; // char del medio
+        if ($ctx->RUNE_LITERAL()) {
+            $inner = substr($ctx->getText(), 1, -1);
+            if (strlen($inner) >= 2 && $inner[0] === '\\') {
+                switch ($inner[1]) {
+                    case 'n':  return 10;
+                    case 't':  return 9;
+                    case 'r':  return 13;
+                    case '0':  return 0;
+                    case '\\': return 92;
+                    case '\'': return 39;
+                    default:   return ord($inner[1]);
+                }
+            }
+            return ord($inner[0]);
+        }
         if ($ctx->TRUE())           return true;
         if ($ctx->FALSE())          return false;
 
@@ -909,7 +929,7 @@ class InterpreterVisitor extends OLCBaseVisitor
             case 'float32': return 0.0;
             case 'bool':    return false;
             case 'string':  return "";
-            case 'rune':    return "\0";
+            case 'rune':    return 0;  // rune por defecto es el código 0, no el char nulo
             default:        return null;
         }
     }
@@ -934,7 +954,7 @@ class InterpreterVisitor extends OLCBaseVisitor
     private function formatValue($val)
     {
         if (is_bool($val))  return $val ? 'true' : 'false';
-        if (is_null($val))  return 'nil';
+        if (is_null($val))  return '<nil>';
         if (is_array($val)) return '[' . implode(' ', array_map([$this, 'formatValue'], $val)) . ']';
         return (string)$val;
     }
