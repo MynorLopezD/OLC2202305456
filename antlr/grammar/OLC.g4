@@ -303,6 +303,7 @@ elementList
 element
     : expression
     | arrayLiteral
+    | '{' elementList? '}'   // <-- fila inline sin tipo
     ;
 
 /*

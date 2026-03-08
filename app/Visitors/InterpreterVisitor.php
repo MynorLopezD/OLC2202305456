@@ -815,25 +815,21 @@ class InterpreterVisitor extends OLCBaseVisitor
 
         if ($ctx->elementList()) {
             foreach ($ctx->elementList()->element() as $el) {
-                // Un element puede ser arrayLiteral (fila de una matriz) o expression
                 if ($el->arrayLiteral()) {
+                    // Fila con tipo explícito: [2]int32{1,0}
                     $elements[] = $this->visit($el->arrayLiteral());
+                } elseif ($el->getChildCount() >= 2 && $el->getChild(0)->getText() === '{') {
+                    // Fila inline sin tipo: {1, 0} — alternativa '{' elementList '}'
+                    $row = [];
+                    if (method_exists($el, 'elementList') && $el->elementList()) {
+                        foreach ($el->elementList()->element() as $inner) {
+                            $row[] = $this->visit($inner->expression());
+                        }
+                    }
+                    $elements[] = $row;
                 } else {
-                    $val = $this->visit($el->expression());
-                    $elements[] = $val;
+                    $elements[] = $this->visit($el->expression());
                 }
-            }
-        }
-
-        // Si el array literal fue declarado vacío pero tiene un tipo con tamaño,
-        // los elementos faltantes se rellenan con el valor por defecto.
-        // El tipo está en el nodo padre (type → arrayType → '[' expression ']' type)
-        $typeCtx = $ctx->type();
-        if ($typeCtx && $typeCtx->arrayType()) {
-            $size      = (int)$this->visit($typeCtx->arrayType()->expression());
-            $innerType = $typeCtx->arrayType()->type()->getText();
-            while (count($elements) < $size) {
-                $elements[] = $this->defaultValue($innerType);
             }
         }
 
@@ -850,7 +846,15 @@ class InterpreterVisitor extends OLCBaseVisitor
     {
         if ($ctx->INT_LITERAL())    return intval($ctx->getText());
         if ($ctx->FLOAT_LITERAL())  return floatval($ctx->getText());
-        if ($ctx->STRING_LITERAL()) return substr($ctx->getText(), 1, -1); // quitar comillas
+        if ($ctx->STRING_LITERAL()) {
+            $raw = substr($ctx->getText(), 1, -1); // quitar comillas
+            // Procesar secuencias de escape
+            return str_replace(
+                ['\\n', '\\t', '\\r', '\\"', '\\\\'],
+                ["\n",  "\t",  "\r",  '"',   "\\"],
+                $raw
+            );
+        }
         if ($ctx->RUNE_LITERAL())   return $ctx->getText()[1]; // char del medio
         if ($ctx->TRUE())           return true;
         if ($ctx->FALSE())          return false;
