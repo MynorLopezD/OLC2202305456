@@ -59,43 +59,53 @@ class InterpreterVisitor extends OLCBaseVisitor
     }
 
     /**
-     * Obtiene el valor de una variable buscando desde el scope más interno
-     * hacia el más externo (closure-like lookup).
+     * Obtiene el valor de una variable buscando desde el scope más interno.
      */
     private function getVar($name)
     {
         for ($i = count($this->scopeStack) - 1; $i >= 0; $i--) {
             if (array_key_exists($name, $this->scopeStack[$i])) {
-                return $this->scopeStack[$i][$name];
+                return $this->scopeStack[$i][$name]['value'];
             }
         }
         return null;
     }
 
     /**
-     * Asigna una variable en el scope más interno donde ya exista,
-     * o en el scope actual si no existe en ninguno.
+     * Obtiene el tipo registrado de una variable.
+     */
+    private function getVarType($name)
+    {
+        for ($i = count($this->scopeStack) - 1; $i >= 0; $i--) {
+            if (array_key_exists($name, $this->scopeStack[$i])) {
+                return $this->scopeStack[$i][$name]['type'] ?? null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Asigna un valor en el scope donde ya existe la variable.
      */
     private function setVar($name, $value)
     {
         for ($i = count($this->scopeStack) - 1; $i >= 0; $i--) {
             if (array_key_exists($name, $this->scopeStack[$i])) {
-                $this->scopeStack[$i][$name] = $value;
+                $this->scopeStack[$i][$name]['value'] = $value;
                 return;
             }
         }
-        // Si no existe en ningún scope, se declara en el actual
         $top = count($this->scopeStack) - 1;
-        $this->scopeStack[$top][$name] = $value;
+        $this->scopeStack[$top][$name] = ['value' => $value, 'type' => null];
     }
 
     /**
-     * Declara una variable en el scope actual (el más interno).
+     * Declara una variable en el scope actual con tipo opcional.
      */
-    private function declareVar($name, $value)
+    private function declareVar($name, $value, $type = null)
     {
         $top = count($this->scopeStack) - 1;
-        $this->scopeStack[$top][$name] = $value;
+        $this->scopeStack[$top][$name] = ['value' => $value, 'type' => $type];
     }
 
     /*
@@ -261,7 +271,6 @@ class InterpreterVisitor extends OLCBaseVisitor
         $type = $ctx->type() ? $ctx->type()->getText() : null;
 
         foreach ($ids as $index => $idToken) {
-
             $id = $idToken->getText();
 
             if ($ctx->exp_list()) {
@@ -271,7 +280,7 @@ class InterpreterVisitor extends OLCBaseVisitor
                 $value = $this->defaultValue($type);
             }
 
-            $this->declareVar($id, $value);
+            $this->declareVar($id, $value, $type);
         }
     }
 
@@ -292,7 +301,8 @@ class InterpreterVisitor extends OLCBaseVisitor
             $value = $this->visit($exps[0]);
             if (is_array($value) && !$this->isSlice($value)) {
                 foreach ($ids as $i => $idToken) {
-                    $this->declareVar($idToken->getText(), $value[$i] ?? null);
+                    $v = $value[$i] ?? null;
+                    $this->declareVar($idToken->getText(), $v, $this->inferType($v));
                 }
                 return;
             }
@@ -304,19 +314,22 @@ class InterpreterVisitor extends OLCBaseVisitor
             $exp = $exps[$index] ?? null;
 
             if ($exp === null) {
-                $this->declareVar($id, null);
+                $this->declareVar($id, null, null);
                 continue;
             }
 
             $value = $this->visit($exp);
 
-            // Si el visitor devolvió null pero el texto parece un slice []tipo{...}
+            // Fallback para slices []tipo{...}
             if ($value === null) {
                 $parsed = $this->tryParseSliceLiteral($exp->getText());
                 if ($parsed !== null) $value = $parsed;
             }
 
-            $this->declareVar($id, $value);
+            // Inferir tipo desde el texto de la expresión para arrayLiterals
+            $type = $this->inferTypeFromExpr($exp, $value);
+
+            $this->declareVar($id, $value, $type);
         }
     }
 
@@ -351,7 +364,7 @@ class InterpreterVisitor extends OLCBaseVisitor
         $value = $this->visit($ctx->expression());
         $value = $this->castToType($value, $type);
 
-        $this->declareVar($id, $value);
+        $this->declareVar($id, $value, $type);
     }
 
     /*
@@ -704,7 +717,13 @@ class InterpreterVisitor extends OLCBaseVisitor
         // typeOf(expr)
         if ($first === 'typeOf') {
             $val = $this->visit($ctx->expression(0));
-            return $this->typeOf($val);
+            // Intentar obtener el tipo almacenado si la expresión es un identificador
+            $storedType = null;
+            $exprText   = trim($ctx->expression(0)->getText());
+            if (preg_match('/^\w+$/', $exprText)) {
+                $storedType = $this->getVarType($exprText);
+            }
+            return $this->typeOf($val, $storedType);
         }
 
         return null;
@@ -1073,17 +1092,45 @@ class InterpreterVisitor extends OLCBaseVisitor
     }
 
     /**
-     * Devuelve el nombre del tipo OLC de un valor PHP.
+     * Devuelve el tipo OLC de un valor, con soporte para tipo almacenado.
      */
-    private function typeOf($value)
+    private function typeOf($value, $storedType = null)
     {
-        if (is_int($value))   return 'int32';
-        if (is_float($value)) return 'float32';
+        // Si hay tipo almacenado explícito, usarlo
+        if ($storedType !== null) return $storedType;
+
+        // Inferir desde el valor PHP
+        return $this->inferType($value);
+    }
+
+    /**
+     * Infiere el tipo OLC desde un valor PHP (para declaraciones cortas).
+     * Usa las reglas de Go: literales int → "int", float → "float64".
+     */
+    private function inferType($value)
+    {
         if (is_bool($value))  return 'bool';
-        if (is_string($value) && strlen($value) === 1) return 'rune';
+        if (is_int($value))   return 'int';       // sin tipo explícito → int (no int32)
+        if (is_float($value)) return 'float64';   // sin tipo explícito → float64
         if (is_string($value)) return 'string';
         if (is_array($value))  return 'array';
         return 'nil';
+    }
+
+    /**
+     * Infiere el tipo desde el nodo de expresión y el valor evaluado.
+     * Para arrayLiteral, extrae el tipo del texto: [3]int32{...} → "[3]int32"
+     */
+    private function inferTypeFromExpr($expCtx, $value)
+    {
+        $text = trim($expCtx->getText());
+
+        // arrayLiteral: empieza con '[' y tiene '{' → extraer tipo
+        if (preg_match('/^(\[\d*\]\w+)\{/', $text, $m)) {
+            return $m[1]; // e.g. "[3]int32", "[]int32"
+        }
+
+        return $this->inferType($value);
     }
 
     /**
