@@ -176,7 +176,7 @@ class InterpreterVisitor extends OLCBaseVisitor
     |---------------------------------------------------
     */
 
-    private function callFunction($name, $argValues)
+    private function callFunction($name, $argValues, $argRefs = [])
     {
         if (!isset($this->functions[$name])) {
             return null;
@@ -199,9 +199,30 @@ class InterpreterVisitor extends OLCBaseVisitor
         // Ejecutar el bloque
         $this->visit($funcCtx->block());
 
+        // Writeback de punteros antes de hacer popScope
+        if (!empty($argRefs) && $funcCtx->params()) {
+            $params = $funcCtx->params()->param();
+            foreach ($params as $i => $param) {
+                $paramName = $param->IDENTIFIER()->getText();
+                $paramType = $param->type()->getText();
+                if (str_starts_with($paramType, '*') && isset($argRefs[$i])) {
+                    // Leer el valor modificado dentro de la función
+                    $modifiedVal = $this->getVar($paramName);
+                    // Salir del scope de la función
+                    $this->popScope();
+                    // Escribir de vuelta en el scope del llamador
+                    $this->setVar($argRefs[$i], $modifiedVal);
+
+                    $result = $this->returnValue;
+                    $this->returnSignal = false;
+                    $this->returnValue  = null;
+                    return $result;
+                }
+            }
+        }
+
         $this->popScope();
 
-        // Capturar valor de retorno
         $result = $this->returnValue;
         $this->returnSignal = false;
         $this->returnValue  = null;
@@ -262,15 +283,59 @@ class InterpreterVisitor extends OLCBaseVisitor
 
     public function visitShortVarDcl($ctx)
     {
-        $ids = $ctx->id_list()->IDENTIFIER();
+        $ids  = $ctx->id_list()->IDENTIFIER();
+        $exps = $ctx->exp_list()->expression();
 
+        // Caso especial: múltiple asignación desde función con múltiple retorno
+        // e.g.  sum, res := operacionesBasicas(50, 20)
+        if (count($ids) > 1 && count($exps) === 1) {
+            $value = $this->visit($exps[0]);
+            if (is_array($value) && !$this->isSlice($value)) {
+                foreach ($ids as $i => $idToken) {
+                    $this->declareVar($idToken->getText(), $value[$i] ?? null);
+                }
+                return;
+            }
+        }
+
+        // Caso normal: una expresión por identificador
         foreach ($ids as $index => $idToken) {
+            $id  = $idToken->getText();
+            $exp = $exps[$index] ?? null;
 
-            $id    = $idToken->getText();
-            $value = $this->visit($ctx->exp_list()->expression($index));
+            if ($exp === null) {
+                $this->declareVar($id, null);
+                continue;
+            }
+
+            $value = $this->visit($exp);
+
+            // Si el visitor devolvió null pero el texto parece un slice []tipo{...}
+            if ($value === null) {
+                $parsed = $this->tryParseSliceLiteral($exp->getText());
+                if ($parsed !== null) $value = $parsed;
+            }
 
             $this->declareVar($id, $value);
         }
+    }
+
+    /**
+     * Detecta si un array PHP es un slice (indexado desde 0 con valores escalares/arrays)
+     * vs un array de múltiple retorno.
+     * Heurística: si tiene solo 2 elementos y ambos son escalares, podría ser múltiple retorno.
+     * No es perfecto pero funciona para los casos del intérprete.
+     */
+    private function isSlice($arr)
+    {
+        // Si tiene más de 2 elementos siempre es un slice
+        if (count($arr) > 2) return true;
+        // Si algún elemento es array, es slice de arrays (matriz)
+        foreach ($arr as $v) {
+            if (is_array($v)) return true;
+        }
+        // Con 1-2 elementos escalares, asumimos múltiple retorno (caso más común)
+        return false;
     }
 
     /*
@@ -447,9 +512,41 @@ class InterpreterVisitor extends OLCBaseVisitor
         if ($ctx->forClause()) {
             $clause = $ctx->forClause();
 
-            // Init
-            if ($clause->simpleStmt(0)) {
-                $this->visit($clause->simpleStmt(0));
+            /*
+            | La gramática es: (simpleStmt)? ';' (expression)? ';' (simpleStmt)?
+            | ANTLR indexa solo los nodos presentes, no las posiciones del texto.
+            | Por eso usamos getText() del forClause para detectar cuántos simpleStmt hay
+            | y en qué posición están, usando los hijos directos del forClause.
+            */
+            $initStmt = null;
+            $postStmt = null;
+            $allSimple = $clause->simpleStmt();  // array de todos los simpleStmt presentes
+
+            // Detectar si el init está presente: el primer hijo del forClause es un simpleStmt
+            // (no un ';'). Si el primer hijo texto es ';', no hay init.
+            $firstChild = $clause->getChild(0);
+            $hasInit = ($firstChild !== null && $firstChild->getText() !== ';');
+
+            if ($hasInit && count($allSimple) > 0) {
+                $initStmt = $allSimple[0];
+            }
+
+            // El post es el último simpleStmt, solo si el último hijo antes de EOF es simpleStmt
+            $lastChild = $clause->getChild($clause->getChildCount() - 1);
+            $hasPost = ($lastChild !== null && $lastChild->getText() !== ';');
+
+            if ($hasPost) {
+                $postStmt = $allSimple[count($allSimple) - 1];
+                // Si init y post son el mismo nodo (solo hay 1 simpleStmt pero hay post)
+                // verificamos que no sea el mismo que el init
+                if ($hasInit && count($allSimple) === 1) {
+                    $postStmt = null; // solo había init, no post
+                }
+            }
+
+            // Ejecutar init
+            if ($initStmt !== null) {
+                $this->visit($initStmt);
             }
 
             while (true) {
@@ -467,17 +564,17 @@ class InterpreterVisitor extends OLCBaseVisitor
                 }
                 if ($this->continueSignal) {
                     $this->continueSignal = false;
-                    // igual ejecuta el post
+                    // continua al post igualmente
                 }
                 if ($this->returnSignal) break;
 
                 // Post
-                if ($clause->simpleStmt(1)) {
-                    $this->visit($clause->simpleStmt(1));
+                if ($postStmt !== null) {
+                    $this->visit($postStmt);
                 }
             }
 
-        // FOR expression block  (while)
+        // FOR expression block (while)
         } elseif ($ctx->expression()) {
             while (true) {
                 $cond = $this->visit($ctx->expression());
@@ -496,7 +593,7 @@ class InterpreterVisitor extends OLCBaseVisitor
                 if ($this->returnSignal) break;
             }
 
-        // FOR block  (loop infinito)
+        // FOR block (loop infinito)
         } else {
             while (true) {
                 $this->visit($ctx->block());
@@ -539,6 +636,7 @@ class InterpreterVisitor extends OLCBaseVisitor
             if (count($exps) === 1) {
                 $this->returnValue = $this->visit($exps[0]);
             } else {
+                // Múltiple retorno: devolver array indexado
                 $values = [];
                 foreach ($exps as $exp) {
                     $values[] = $this->visit($exp);
@@ -761,13 +859,23 @@ class InterpreterVisitor extends OLCBaseVisitor
         // Llamada a función: primaryExpr '(' exp_list? ')'
         if ($childCount >= 3 && $ctx->getChild(1)->getText() === '(') {
             $name = $ctx->primaryExpr()->getText();
-            $args = [];
+            $args    = [];
+            $argRefs = []; // nombres de variables pasadas por referencia (&var)
+
             if ($ctx->exp_list()) {
-                foreach ($ctx->exp_list()->expression() as $exp) {
-                    $args[] = $this->visit($exp);
+                foreach ($ctx->exp_list()->expression() as $i => $exp) {
+                    $expText = $exp->getText();
+                    // Detectar paso por referencia: &varName
+                    if (str_starts_with($expText, '&')) {
+                        $varName    = substr($expText, 1);
+                        $args[]     = $this->getVar($varName); // pasar el valor actual
+                        $argRefs[$i] = $varName;               // guardar nombre para writeback
+                    } else {
+                        $args[] = $this->visit($exp);
+                    }
                 }
             }
-            return $this->callFunction($name, $args);
+            return $this->callFunction($name, $args, $argRefs);
         }
 
         // fmt.Println(...)
@@ -811,9 +919,39 @@ class InterpreterVisitor extends OLCBaseVisitor
 
     /*
     |---------------------------------------------------
-    | ARRAY LITERAL
+    | SLICE LITERAL HELPER
+    | Parsea manualmente []tipo{v1,v2,...} cuando la gramática
+    | no lo reconoce como arrayLiteral por falta de tamaño.
     |---------------------------------------------------
     */
+    private function tryParseSliceLiteral($text)
+    {
+        // Detectar patrón []tipo{...}  o [N]tipo{...}
+        if (!preg_match('/^\[(\d*)\](\w+)\{(.*)\}$/s', trim($text), $m)) {
+            return null;
+        }
+        $inner = trim($m[3]);
+        if ($inner === '') return [];
+
+        // Separar elementos por coma (simplificado, funciona para literales planos)
+        $parts = array_map('trim', explode(',', $inner));
+        $result = [];
+        foreach ($parts as $part) {
+            if ($part === '') continue;
+            if (is_numeric($part) && strpos($part, '.') !== false) {
+                $result[] = floatval($part);
+            } elseif (is_numeric($part)) {
+                $result[] = intval($part);
+            } elseif ($part === 'true') {
+                $result[] = true;
+            } elseif ($part === 'false') {
+                $result[] = false;
+            } else {
+                $result[] = trim($part, '"\'');
+            }
+        }
+        return $result;
+    }
 
     public function visitArrayLiteral($ctx)
     {

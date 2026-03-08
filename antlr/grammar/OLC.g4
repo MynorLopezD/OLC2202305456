@@ -323,7 +323,7 @@ pointerType
     ;
 
 arrayType
-    : '[' expression ']' type
+    : '[' expression? ']' type
     ;
 
 baseType
