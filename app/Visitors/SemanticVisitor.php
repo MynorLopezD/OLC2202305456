@@ -30,6 +30,18 @@ class SemanticVisitor extends OLCBaseVisitor
         );
         $prev        = $this->scope;
         $this->scope = $name;
+
+        // Registrar parámetros en la tabla de símbolos bajo el scope de la función
+        if ($ctx->params()) {
+            foreach ($ctx->params()->param() as $param) {
+                $paramName = $param->IDENTIFIER()->getText();
+                $paramType = $param->type() ? $param->type()->getText() : 'unknown';
+                $paramLine = $param->start->getLine();
+                $paramCol  = $param->start->getCharPositionInLine();
+                $this->symbols->add($paramName, $paramType, $this->scope, null, $paramLine, $paramCol);
+            }
+        }
+
         $this->visitChildren($ctx);
         $this->scope = $prev;
         return null;
@@ -114,19 +126,26 @@ class SemanticVisitor extends OLCBaseVisitor
 
     // ----------------------------------------------------------------
     // Verificar uso de identificadores no declarados
-    // Se verifica en primaryExpr cuando es solo un IDENTIFIER (no función ni array)
     // ----------------------------------------------------------------
     public function visitPrimaryExpr($ctx)
     {
         if (!$ctx) return null;
 
-        // Solo nos interesa el caso: un IDENTIFIER puro (sin '(' ni '[' a la derecha)
+        // Caso: IDENTIFIER puro (sin '(' ni '[' siguientes) → verificar si está declarado
         if ($ctx->IDENTIFIER() && $ctx->getChildCount() === 1) {
-            $name = $ctx->IDENTIFIER()->getText();
-            $line = $ctx->start->getLine();
-            $col  = $ctx->start->getCharPositionInLine();
+            $name    = $ctx->IDENTIFIER()->getText();
+            $line    = $ctx->start->getLine();
+            $col     = $ctx->start->getCharPositionInLine();
+            $parent  = $ctx->getParent();
 
-            if (!$this->isDeclared($name)) {
+            // Si el padre es una llamada func(...), este IDENTIFIER es el nombre
+            // de la función — no es una variable, no verificar
+            $isCallTarget = $parent
+                && $parent->getChildCount() >= 3
+                && $parent->getChild(1) !== null
+                && $parent->getChild(1)->getText() === '(';
+
+            if (!$isCallTarget && !$this->isDeclared($name)) {
                 $this->errors->add(
                     "Semántico",
                     "Variable '$name' no declarada",
