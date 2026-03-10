@@ -129,9 +129,10 @@ class InterpreterService
         }
 
         // ── INTERPRETACIÓN ───────────────────────────────────────────
-        // Se pasa $errors para que el visitor consulte errores sintácticos
-        // ya registrados y evite ejecutar bloques con construcciones inválidas.
         $interpreter = new InterpreterVisitor($symbolTable, $errors);
+        // Marcar las líneas con errores sintácticos para que el visitor
+        // no ejecute bloques huérfanos generados por error recovery de ANTLR
+        $interpreter->markOrphanBlockLines($errors->getAll());
         $interpreter->executeMain($tree);
 
         // ── TOKENS ───────────────────────────────────────────────────

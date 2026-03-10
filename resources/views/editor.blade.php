@@ -198,7 +198,7 @@
         const token  = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
 
         const consola = document.getElementById('console');
-        consola.innerText += '> Enviando código al servidor...\n';
+        //consola.innerText += '> Enviando código al servidor...\n';
 
         try {
             const response = await fetch('/analizar', {

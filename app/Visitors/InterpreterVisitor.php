@@ -16,6 +16,7 @@ class InterpreterVisitor extends OLCBaseVisitor
     private $returnValue    = null;
 
     private $runtimeErrors = [];
+    private $orphanLines   = [];  // líneas con error sintáctico → bloques huérfanos
 
     /**
      * @param $symbolTable  SymbolTable
@@ -52,14 +53,18 @@ class InterpreterVisitor extends OLCBaseVisitor
 
     /**
      * Devuelve true si el ErrorManager ya registró un error sintáctico
-     * en la línea indicada (±1 línea de tolerancia).
+     * dentro del rango de líneas [startLine, endLine] del nodo.
      */
-    private function hasSyntaxErrorAt(int $line): bool
+    private function hasSyntaxErrorAt(int $startLine, int $endLine = -1): bool
     {
         if (!$this->errorManager) return false;
+        if ($endLine < 0) $endLine = $startLine + 3; // tolerancia por defecto
         foreach ($this->errorManager->getAll() as $err) {
-            if ($err['tipo'] === 'Sintáctico' && abs(($err['linea'] ?? 0) - $line) <= 1) {
-                return true;
+            if ($err['tipo'] === 'Sintáctico') {
+                $errLine = $err['linea'] ?? 0;
+                if ($errLine >= $startLine && $errLine <= $endLine) {
+                    return true;
+                }
             }
         }
         return false;
@@ -210,16 +215,50 @@ class InterpreterVisitor extends OLCBaseVisitor
     }
 
     // ----------------------------------------------------------------
-    // BLOCK
+    // BLOCK — no ejecutar si su token de apertura '{' tiene error sintáctico
     // ----------------------------------------------------------------
     public function visitBlock($ctx): void
     {
         if (!$ctx) return;
+
+        if ($ctx->start) {
+            $openLine = $ctx->start->getLine();
+            $openCol  = $ctx->start->getCharPositionInLine();
+
+            // Buscar si hay un error sintáctico cuya columna sea <= a la del '{'
+            // en la misma línea — señal de que el bloque es huérfano por recovery
+            if ($this->hasSyntaxErrorOnBlockOpen($openLine, $openCol)) {
+                return;
+            }
+        }
+
         foreach ($ctx->declaration() as $decl) {
             if (!$decl) continue;
             $this->safeVisit($decl);
             if ($this->breakSignal || $this->continueSignal || $this->returnSignal) break;
         }
+    }
+
+    /**
+     * Calcula las líneas de bloques huérfanos: líneas donde hay error sintáctico
+     * y que corresponden a un '{' de bloque. Se llama desde InterpreterService
+     * antes de executeMain().
+     */
+    public function markOrphanBlockLines(array $syntaxErrors): void
+    {
+        foreach ($syntaxErrors as $err) {
+            if ($err['tipo'] === 'Sintáctico') {
+                // Guardar la línea del error; los bloques que abran en esa línea
+                // o en la línea siguiente serán considerados huérfanos
+                $this->orphanLines[$err['linea'] ?? 0] = true;
+            }
+        }
+    }
+
+    private function hasSyntaxErrorOnBlockOpen(int $line, int $col): bool
+    {
+        // Un bloque es huérfano si hay un error sintáctico en su línea exacta
+        return isset($this->orphanLines[$line]);
     }
 
     // ----------------------------------------------------------------
@@ -358,28 +397,50 @@ class InterpreterVisitor extends OLCBaseVisitor
     }
 
     // ----------------------------------------------------------------
-    // IF — si hay error sintáctico en esa línea, no ejecutar el bloque
+    // IF — protección multicapa contra error recovery de ANTLR
     // ----------------------------------------------------------------
     public function visitIfStmt($ctx): void
     {
         if (!$ctx) return;
 
-        $line = $ctx->start ? $ctx->start->getLine() : 0;
+        $startLine = $ctx->start ? $ctx->start->getLine() : 0;
+        $endLine   = $ctx->stop  ? $ctx->stop->getLine()  : $startLine + 5;
 
-        // Si ANTLR ya reportó error sintáctico en esta línea → omitir todo
-        if ($this->hasSyntaxErrorAt($line)) {
+        // Capa 1: error sintáctico registrado en el rango del nodo
+        if ($this->hasSyntaxErrorAt($startLine, $endLine)) {
             return;
         }
 
         $this->pushScope();
         if ($ctx->simpleStmt()) $this->safeVisit($ctx->simpleStmt());
 
+        // Capa 2: expression ausente
         if (!$ctx->expression()) {
             $this->popScope();
             return;
         }
 
+        // Capa 3: expression con texto inválido
+        $exprText = trim($ctx->expression()->getText());
+        if ($exprText === '' || $exprText === '{') {
+            $this->popScope();
+            return;
+        }
+
+        // Capa 4: ErrorNode en la expression
+        if ($this->isErrorNode($ctx->expression())) {
+            $this->popScope();
+            return;
+        }
+
         $condition = $this->safeVisit($ctx->expression());
+
+        // Capa 5: condición nula
+        if (is_null($condition)) {
+            $this->popScope();
+            return;
+        }
+
         if ($condition) {
             $this->safeVisit($ctx->block(0));
         } else {
@@ -387,6 +448,32 @@ class InterpreterVisitor extends OLCBaseVisitor
             elseif ($ctx->block(1)) $this->safeVisit($ctx->block(1));
         }
         $this->popScope();
+    }
+
+    /**
+     * Verifica si un nodo del árbol contiene tokens de error recovery de ANTLR.
+     */
+    private function isErrorNode($ctx): bool
+    {
+        if ($ctx === null) return true;
+        try {
+            $text = trim($ctx->getText());
+            if ($text === '' || $text === '<EOF>') return true;
+            if (str_starts_with($text, '<missing')) return true;
+
+            for ($i = 0; $i < $ctx->getChildCount(); $i++) {
+                $child = $ctx->getChild($i);
+                if ($child === null) continue;
+                if ($child instanceof \Antlr\Antlr4\Runtime\Tree\ErrorNode) return true;
+                try {
+                    $childText = $child->getText();
+                    if (str_starts_with($childText, '<missing')) return true;
+                } catch (\Throwable $e) {}
+            }
+        } catch (\Throwable $e) {
+            return true;
+        }
+        return false;
     }
 
     // ----------------------------------------------------------------
@@ -427,16 +514,16 @@ class InterpreterVisitor extends OLCBaseVisitor
     }
 
     // ----------------------------------------------------------------
-    // FOR — si hay error sintáctico en esa línea, no ejecutar
+    // FOR — si hay error sintáctico en el rango del nodo, no ejecutar
     // ----------------------------------------------------------------
     public function visitForStmt($ctx): void
     {
         if (!$ctx) return;
 
-        $line = $ctx->start ? $ctx->start->getLine() : 0;
+        $startLine = $ctx->start ? $ctx->start->getLine() : 0;
+        $endLine   = $ctx->stop  ? $ctx->stop->getLine()  : $startLine + 5;
 
-        // Si ANTLR ya reportó error sintáctico en esta línea → omitir
-        if ($this->hasSyntaxErrorAt($line)) {
+        if ($this->hasSyntaxErrorAt($startLine, $endLine)) {
             return;
         }
 
