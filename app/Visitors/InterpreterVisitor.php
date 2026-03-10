@@ -1,93 +1,95 @@
 <?php
-
 namespace App\Visitors;
-
 use ANTLR\OLCBaseVisitor;
 
 class InterpreterVisitor extends OLCBaseVisitor
 {
-
-    private $output = "";
-
-    /*
-    | Variables globales del scope actual.
-    | Se usa un stack de scopes para manejar funciones y bloques.
-    */
-    private $scopeStack = [];
-
-    /*
-    | Almacena las funciones definidas: nombre => ctx del nodo functionDcl
-    */
-    private $functions = [];
-
+    private $output        = "";
+    private $scopeStack    = [];
+    private $functions     = [];
     private $symbolTable;
+    private $errorManager;          // ← nuevo: para consultar errores sintácticos
 
-    /*
-    | Señales de control de flujo
-    */
     private $breakSignal    = false;
     private $continueSignal = false;
     private $returnSignal   = false;
     private $returnValue    = null;
 
-    public function __construct($symbolTable)
+    private $runtimeErrors = [];
+
+    /**
+     * @param $symbolTable  SymbolTable
+     * @param $errorManager App\Services\ErrorManager|null
+     */
+    public function __construct($symbolTable, $errorManager = null)
     {
-        $this->symbolTable = $symbolTable;
-        // Scope global inicial
+        $this->symbolTable  = $symbolTable;
+        $this->errorManager = $errorManager;
         $this->scopeStack[] = [];
     }
 
-    public function getOutput()
-    {
-        return $this->output;
-    }
+    public function getOutput():        string { return $this->output; }
+    public function getRuntimeErrors(): array  { return $this->runtimeErrors; }
 
-    /*
-    |---------------------------------------------------
-    | HELPERS DE SCOPE
-    |---------------------------------------------------
-    */
-
-    private function pushScope()
+    // ----------------------------------------------------------------
+    // safeVisit
+    // ----------------------------------------------------------------
+    private function safeVisit($ctx, $fallback = null)
     {
-        $this->scopeStack[] = [];
-    }
-
-    private function popScope()
-    {
-        array_pop($this->scopeStack);
+        if ($ctx === null) return $fallback;
+        try {
+            return $this->visit($ctx);
+        } catch (\Throwable $e) {
+            $this->runtimeErrors[] = [
+                'tipo'        => 'Semántico',
+                'descripcion' => 'Error en ejecución: ' . $e->getMessage(),
+                'linea'       => 0,
+                'columna'     => 0,
+            ];
+            return $fallback;
+        }
     }
 
     /**
-     * Obtiene el valor de una variable buscando desde el scope más interno.
+     * Devuelve true si el ErrorManager ya registró un error sintáctico
+     * en la línea indicada (±1 línea de tolerancia).
      */
+    private function hasSyntaxErrorAt(int $line): bool
+    {
+        if (!$this->errorManager) return false;
+        foreach ($this->errorManager->getAll() as $err) {
+            if ($err['tipo'] === 'Sintáctico' && abs(($err['linea'] ?? 0) - $line) <= 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ----------------------------------------------------------------
+    // SCOPE
+    // ----------------------------------------------------------------
+    private function pushScope(): void { $this->scopeStack[] = []; }
+    private function popScope():  void { array_pop($this->scopeStack); }
+
     private function getVar($name)
     {
         for ($i = count($this->scopeStack) - 1; $i >= 0; $i--) {
-            if (array_key_exists($name, $this->scopeStack[$i])) {
+            if (array_key_exists($name, $this->scopeStack[$i]))
                 return $this->scopeStack[$i][$name]['value'];
-            }
         }
         return null;
     }
 
-    /**
-     * Obtiene el tipo registrado de una variable.
-     */
     private function getVarType($name)
     {
         for ($i = count($this->scopeStack) - 1; $i >= 0; $i--) {
-            if (array_key_exists($name, $this->scopeStack[$i])) {
+            if (array_key_exists($name, $this->scopeStack[$i]))
                 return $this->scopeStack[$i][$name]['type'] ?? null;
-            }
         }
         return null;
     }
 
-    /**
-     * Asigna un valor en el scope donde ya existe la variable.
-     */
-    private function setVar($name, $value)
+    private function setVar($name, $value): void
     {
         for ($i = count($this->scopeStack) - 1; $i >= 0; $i--) {
             if (array_key_exists($name, $this->scopeStack[$i])) {
@@ -99,130 +101,99 @@ class InterpreterVisitor extends OLCBaseVisitor
         $this->scopeStack[$top][$name] = ['value' => $value, 'type' => null];
     }
 
-    /**
-     * Declara una variable en el scope actual con tipo opcional.
-     */
-    private function declareVar($name, $value, $type = null)
+    private function declareVar($name, $value, $type = null): void
     {
         $top = count($this->scopeStack) - 1;
         $this->scopeStack[$top][$name] = ['value' => $value, 'type' => $type];
     }
 
-    /*
-    |---------------------------------------------------
-    | ENTRY POINT
-    |---------------------------------------------------
-    */
-
-    public function executeMain($tree)
+    private function updateSymbolValue(string $name, $value): void
     {
-        if (method_exists($tree, 'declaration')) {
-            $this->visit($tree);
-        } else {
-            $this->visitProgram($tree);
-        }
-    }
-
-    /*
-    |---------------------------------------------------
-    | PROGRAM
-    |---------------------------------------------------
-    */
-
-    public function visitProgram($ctx)
-    {
-        // Primera pasada: registrar todas las funciones
-        foreach ($ctx->declaration() as $decl) {
-            $child = $decl->getChild(0);
-            if ($child && method_exists($child, 'IDENTIFIER') && method_exists($child, 'block')) {
-                $name = $child->IDENTIFIER()->getText();
-                $this->functions[$name] = $child;
+        $symbols = &$this->symbolTable->getRef();
+        for ($i = count($symbols) - 1; $i >= 0; $i--) {
+            if ($symbols[$i]['id'] === $name) {
+                $symbols[$i]['value'] = $this->formatValue($value);
+                break;
             }
         }
+    }
 
-        // Segunda pasada: ejecutar (visitFunctionDcl se encarga de solo correr main)
-        foreach ($ctx->declaration() as $decl) {
-            $this->visit($decl);
+    // ----------------------------------------------------------------
+    // ENTRY POINT
+    // ----------------------------------------------------------------
+    public function executeMain($tree): void
+    {
+        if ($tree === null) return;
+        try {
+            $this->visit($tree);
+        } catch (\Throwable $e) {
+            $this->runtimeErrors[] = [
+                'tipo'        => 'Semántico',
+                'descripcion' => 'Error fatal: ' . $e->getMessage(),
+                'linea'       => 0,
+                'columna'     => 0,
+            ];
         }
     }
 
-    /*
-    |---------------------------------------------------
-    | DECLARATION
-    |---------------------------------------------------
-    */
-
-    public function visitDeclaration($ctx)
+    // ----------------------------------------------------------------
+    // PROGRAM
+    // ----------------------------------------------------------------
+    public function visitProgram($ctx): void
     {
-        return $this->visitChildren($ctx);
+        if (!$ctx) return;
+        foreach ($ctx->declaration() as $decl) {
+            if (!$decl) continue;
+            $child = $decl->getChild(0);
+            if ($child && method_exists($child, 'IDENTIFIER') && method_exists($child, 'block')) {
+                try { $this->functions[$child->IDENTIFIER()->getText()] = $child; }
+                catch (\Throwable $e) {}
+            }
+        }
+        foreach ($ctx->declaration() as $decl) {
+            $this->safeVisit($decl);
+        }
     }
 
-    /*
-    |---------------------------------------------------
-    | FUNCTIONS — DECLARACION
-    |---------------------------------------------------
-    */
+    public function visitDeclaration($ctx) { return $this->visitChildren($ctx); }
 
-    public function visitFunctionDcl($ctx)
+    // ----------------------------------------------------------------
+    // FUNCTIONS
+    // ----------------------------------------------------------------
+    public function visitFunctionDcl($ctx): void
     {
+        if (!$ctx) return;
         $name = $ctx->IDENTIFIER()->getText();
-
-        // Registrar siempre la función para poder llamarla
         $this->functions[$name] = $ctx;
-
-        // Solo ejecutar main automáticamente
-        if ($name === "main") {
+        if ($name === 'main') {
             $this->pushScope();
-            $this->visit($ctx->block());
+            $this->safeVisit($ctx->block());
             $this->popScope();
         }
     }
 
-    /*
-    |---------------------------------------------------
-    | FUNCTIONS — LLAMADA
-    | Se invoca desde visitPrimaryExpr cuando detecta
-    | primaryExpr '(' exp_list? ')'
-    |---------------------------------------------------
-    */
-
     private function callFunction($name, $argValues, $argRefs = [])
     {
-        if (!isset($this->functions[$name])) {
-            return null;
-        }
-
+        if (!isset($this->functions[$name])) return null;
         $funcCtx = $this->functions[$name];
-
         $this->pushScope();
 
-        // Vincular parámetros con argumentos
         if ($funcCtx->params()) {
-            $params = $funcCtx->params()->param();
-            foreach ($params as $i => $param) {
-                $paramName  = $param->IDENTIFIER()->getText();
-                $paramValue = isset($argValues[$i]) ? $argValues[$i] : null;
-                $this->declareVar($paramName, $paramValue);
+            foreach ($funcCtx->params()->param() as $i => $param) {
+                $this->declareVar($param->IDENTIFIER()->getText(), $argValues[$i] ?? null);
             }
         }
 
-        // Ejecutar el bloque
-        $this->visit($funcCtx->block());
+        $this->safeVisit($funcCtx->block());
 
-        // Writeback de punteros antes de hacer popScope
         if (!empty($argRefs) && $funcCtx->params()) {
-            $params = $funcCtx->params()->param();
-            foreach ($params as $i => $param) {
+            foreach ($funcCtx->params()->param() as $i => $param) {
                 $paramName = $param->IDENTIFIER()->getText();
                 $paramType = $param->type()->getText();
                 if (str_starts_with($paramType, '*') && isset($argRefs[$i])) {
-                    // Leer el valor modificado dentro de la función
                     $modifiedVal = $this->getVar($paramName);
-                    // Salir del scope de la función
                     $this->popScope();
-                    // Escribir de vuelta en el scope del llamador
                     $this->setVar($argRefs[$i], $modifiedVal);
-
                     $result = $this->returnValue;
                     $this->returnSignal = false;
                     $this->returnValue  = null;
@@ -232,270 +203,214 @@ class InterpreterVisitor extends OLCBaseVisitor
         }
 
         $this->popScope();
-
         $result = $this->returnValue;
         $this->returnSignal = false;
         $this->returnValue  = null;
-
         return $result;
     }
 
-    /*
-    |---------------------------------------------------
-    | BLOCK
-    |---------------------------------------------------
-    */
-
-    public function visitBlock($ctx)
+    // ----------------------------------------------------------------
+    // BLOCK
+    // ----------------------------------------------------------------
+    public function visitBlock($ctx): void
     {
+        if (!$ctx) return;
         foreach ($ctx->declaration() as $decl) {
-
-            $this->visit($decl);
-
-            // Propagar señales de control de flujo
-            if ($this->breakSignal || $this->continueSignal || $this->returnSignal) {
-                break;
-            }
+            if (!$decl) continue;
+            $this->safeVisit($decl);
+            if ($this->breakSignal || $this->continueSignal || $this->returnSignal) break;
         }
     }
 
-    /*
-    |---------------------------------------------------
-    | VARIABLES
-    |---------------------------------------------------
-    */
-
-    public function visitVarDcl($ctx)
+    // ----------------------------------------------------------------
+    // VARIABLES
+    // ----------------------------------------------------------------
+    public function visitVarDcl($ctx): void
     {
+        if (!$ctx) return;
         $ids  = $ctx->id_list()->IDENTIFIER();
         $type = $ctx->type() ? $ctx->type()->getText() : null;
 
         foreach ($ids as $index => $idToken) {
             $id = $idToken->getText();
-
             if ($ctx->exp_list()) {
-                $value = $this->visit($ctx->exp_list()->expression($index));
-                $value = $this->castToType($value, $type);
+                $expNode = $ctx->exp_list()->expression($index);
+                $value   = $this->safeVisit($expNode);
+                $value   = $this->castToType($value, $type);
             } else {
                 $value = $this->defaultValue($type);
             }
-
             $this->declareVar($id, $value, $type);
+            $this->updateSymbolValue($id, $value);
         }
     }
 
-    /*
-    |---------------------------------------------------
-    | SHORT VAR
-    |---------------------------------------------------
-    */
-
-    public function visitShortVarDcl($ctx)
+    public function visitShortVarDcl($ctx): void
     {
+        if (!$ctx) return;
         $ids  = $ctx->id_list()->IDENTIFIER();
         $exps = $ctx->exp_list()->expression();
 
-        // Caso especial: múltiple asignación desde función con múltiple retorno
-        // e.g.  sum, res := operacionesBasicas(50, 20)
         if (count($ids) > 1 && count($exps) === 1) {
-            $value = $this->visit($exps[0]);
+            $value = $this->safeVisit($exps[0]);
             if (is_array($value) && !$this->isSlice($value)) {
                 foreach ($ids as $i => $idToken) {
                     $v = $value[$i] ?? null;
                     $this->declareVar($idToken->getText(), $v, $this->inferType($v));
+                    $this->updateSymbolValue($idToken->getText(), $v);
                 }
                 return;
             }
         }
 
-        // Caso normal: una expresión por identificador
         foreach ($ids as $index => $idToken) {
             $id  = $idToken->getText();
             $exp = $exps[$index] ?? null;
+            if ($exp === null) { $this->declareVar($id, null); continue; }
 
-            if ($exp === null) {
-                $this->declareVar($id, null, null);
-                continue;
-            }
-
-            $value = $this->visit($exp);
-
-            // Fallback para slices []tipo{...}
+            $value = $this->safeVisit($exp);
             if ($value === null) {
                 $parsed = $this->tryParseSliceLiteral($exp->getText());
                 if ($parsed !== null) $value = $parsed;
             }
-
-            // Inferir tipo desde el texto de la expresión para arrayLiterals
             $type = $this->inferTypeFromExpr($exp, $value);
-
             $this->declareVar($id, $value, $type);
+            $this->updateSymbolValue($id, $value);
         }
     }
 
-    /**
-     * Detecta si un array PHP es un slice (indexado desde 0 con valores escalares/arrays)
-     * vs un array de múltiple retorno.
-     * Heurística: si tiene solo 2 elementos y ambos son escalares, podría ser múltiple retorno.
-     * No es perfecto pero funciona para los casos del intérprete.
-     */
-    private function isSlice($arr)
+    private function isSlice($arr): bool
     {
-        // Si tiene más de 2 elementos siempre es un slice
         if (count($arr) > 2) return true;
-        // Si algún elemento es array, es slice de arrays (matriz)
-        foreach ($arr as $v) {
-            if (is_array($v)) return true;
-        }
-        // Con 1-2 elementos escalares, asumimos múltiple retorno (caso más común)
+        foreach ($arr as $v) { if (is_array($v)) return true; }
         return false;
     }
 
-    /*
-    |---------------------------------------------------
-    | CONSTANTES
-    |---------------------------------------------------
-    */
-
-    public function visitConstDcl($ctx)
+    public function visitConstDcl($ctx): void
     {
+        if (!$ctx) return;
         $id    = $ctx->IDENTIFIER()->getText();
         $type  = $ctx->type() ? $ctx->type()->getText() : null;
-        $value = $this->visit($ctx->expression());
-        $value = $this->castToType($value, $type);
-
+        $value = $this->castToType($this->safeVisit($ctx->expression()), $type);
         $this->declareVar($id, $value, $type);
+        $this->updateSymbolValue($id, $value);
     }
 
-    /*
-    |---------------------------------------------------
-    | ASIGNACIONES
-    |---------------------------------------------------
-    */
-
-    public function visitAssignmentStmt($ctx)
+    // ----------------------------------------------------------------
+    // ASSIGNMENTS
+    // ----------------------------------------------------------------
+    public function visitAssignmentStmt($ctx): void
     {
-        // Caso: primaryExpr ('++' | '--')
-        if ($ctx->getChildCount() == 2) {
-            $op       = $ctx->getChild(1)->getText();
-            $primary  = $ctx->primaryExpr();
-            $name     = $primary->getText();
-            $curr     = $this->getVar($name);
+        if (!$ctx) return;
 
-            if ($op === '++') $this->setVar($name, $curr + 1);
-            else              $this->setVar($name, $curr - 1);
+        if ($ctx->getChildCount() == 2) {
+            $op     = $ctx->getChild(1)->getText();
+            $name   = $ctx->primaryExpr()->getText();
+            $curr   = $this->getVar($name);
+            $newVal = ($op === '++') ? $curr + 1 : $curr - 1;
+            $this->setVar($name, $newVal);
+            $this->updateSymbolValue($name, $newVal);
             return;
         }
 
-        // Caso: primaryExpr assignOp expression
         $primaryCtx = $ctx->primaryExpr();
-        $op         = $ctx->assignOp()->getText();
-        $value      = $this->visit($ctx->expression());
+        if (!$primaryCtx) return;
+        $op    = $ctx->assignOp()->getText();
+        $value = $this->safeVisit($ctx->expression());
 
-        // Detectar acceso indexado: puede ser arr[i] o mat[i][j] (anidado)
         $indices = [];
         $current = $primaryCtx;
-
-        // Desempacar cadena de accesos: mat[i][j] => nombre=mat, indices=[i,j]
-        while ($current->getChildCount() === 4 && $current->getChild(1)->getText() === '[') {
-            array_unshift($indices, (int)$this->visit($current->expression()));
+        while ($current && $current->getChildCount() === 4 && $current->getChild(1)->getText() === '[') {
+            array_unshift($indices, (int)$this->safeVisit($current->expression(), 0));
             $current = $current->primaryExpr();
         }
 
         if (!empty($indices)) {
-            // $current ahora es el nodo hoja con el nombre de la variable
-            $varName = $current->getText();
+            $varName = $current ? $current->getText() : '';
             $arr     = $this->getVar($varName);
-
-            // Navegar hasta el penúltimo nivel y asignar
+            if (!is_array($arr)) return;
             $ref = &$arr;
-            for ($i = 0; $i < count($indices) - 1; $i++) {
-                $ref = &$ref[$indices[$i]];
-            }
-            $lastIdx     = $indices[count($indices) - 1];
-            $curr        = $ref[$lastIdx] ?? 0;
-            $ref[$lastIdx] = $this->applyAssignOp($curr, $op, $value);
-
+            for ($i = 0; $i < count($indices) - 1; $i++) $ref = &$ref[$indices[$i]];
+            $lastIdx       = $indices[count($indices) - 1];
+            $ref[$lastIdx] = $this->applyAssignOp($ref[$lastIdx] ?? 0, $op, $value);
             $this->setVar($varName, $arr);
+            $this->updateSymbolValue($varName, $arr);
             return;
         }
 
-        // Variable simple
-        $name = $primaryCtx->getText();
-        $curr = $this->getVar($name);
-        $this->setVar($name, $this->applyAssignOp($curr, $op, $value));
+        $name   = $primaryCtx->getText();
+        $curr   = $this->getVar($name);
+        $newVal = $this->applyAssignOp($curr, $op, $value);
+        $this->setVar($name, $newVal);
+        $this->updateSymbolValue($name, $newVal);
     }
 
     private function applyAssignOp($curr, $op, $value)
     {
-        switch ($op) {
-            case '=':  return $value;
-            case '+=': return $curr + $value;
-            case '-=': return $curr - $value;
-            case '*=': return $curr * $value;
-            case '/=': return $curr != 0 ? intdiv($curr, $value) : 0;
-            default:   return $value;
-        }
+        return match($op) {
+            '='  => $value,
+            '+=' => $curr + $value,
+            '-=' => $curr - $value,
+            '*=' => $curr * $value,
+            '/=' => ($value != 0) ? intdiv((int)$curr, (int)$value) : 0,
+            default => $value,
+        };
     }
 
-    /*
-    |---------------------------------------------------
-    | IF
-    |---------------------------------------------------
-    */
-
-    public function visitIfStmt($ctx)
+    // ----------------------------------------------------------------
+    // IF — si hay error sintáctico en esa línea, no ejecutar el bloque
+    // ----------------------------------------------------------------
+    public function visitIfStmt($ctx): void
     {
+        if (!$ctx) return;
+
+        $line = $ctx->start ? $ctx->start->getLine() : 0;
+
+        // Si ANTLR ya reportó error sintáctico en esta línea → omitir todo
+        if ($this->hasSyntaxErrorAt($line)) {
+            return;
+        }
+
         $this->pushScope();
+        if ($ctx->simpleStmt()) $this->safeVisit($ctx->simpleStmt());
 
-        // Simple stmt opcional (e.g. temp := x * 2)
-        if ($ctx->simpleStmt()) {
-            $this->visit($ctx->simpleStmt());
+        if (!$ctx->expression()) {
+            $this->popScope();
+            return;
         }
 
-        $condition = $this->visit($ctx->expression());
-
+        $condition = $this->safeVisit($ctx->expression());
         if ($condition) {
-            // Primer block = rama true
-            $this->visit($ctx->block(0));
+            $this->safeVisit($ctx->block(0));
         } else {
-            // Rama else
-            if ($ctx->ifStmt()) {
-                // else if
-                $this->visit($ctx->ifStmt());
-            } elseif ($ctx->block(1)) {
-                // else { }
-                $this->visit($ctx->block(1));
-            }
+            if ($ctx->ifStmt())     $this->safeVisit($ctx->ifStmt());
+            elseif ($ctx->block(1)) $this->safeVisit($ctx->block(1));
         }
-
         $this->popScope();
     }
 
-    /*
-    |---------------------------------------------------
-    | SWITCH
-    |---------------------------------------------------
-    */
-
-    public function visitSwitchStmt($ctx)
+    // ----------------------------------------------------------------
+    // SWITCH
+    // ----------------------------------------------------------------
+    public function visitSwitchStmt($ctx): void
     {
-        $switchVal = $this->visit($ctx->expression());
+        if (!$ctx || !$ctx->expression()) return;
+        $switchVal = $this->safeVisit($ctx->expression());
         $matched   = false;
 
         foreach ($ctx->caseClause() as $case) {
+            if (!$case || !$case->exp_list()) continue;
             foreach ($case->exp_list()->expression() as $exp) {
-                $caseVal = $this->visit($exp);
-                if ($caseVal == $switchVal) {
+                if ($this->safeVisit($exp) == $switchVal) {
                     $matched = true;
                     $this->pushScope();
                     foreach ($case->declaration() as $decl) {
-                        $this->visit($decl);
+                        $this->safeVisit($decl);
                         if ($this->breakSignal || $this->returnSignal) break;
                     }
                     $this->popScope();
                     $this->breakSignal = false;
-                    break 2; // Solo el primer case que coincide
+                    break 2;
                 }
             }
         }
@@ -503,7 +418,7 @@ class InterpreterVisitor extends OLCBaseVisitor
         if (!$matched && $ctx->defaultClause()) {
             $this->pushScope();
             foreach ($ctx->defaultClause()->declaration() as $decl) {
-                $this->visit($decl);
+                $this->safeVisit($decl);
                 if ($this->breakSignal || $this->returnSignal) break;
             }
             $this->popScope();
@@ -511,632 +426,435 @@ class InterpreterVisitor extends OLCBaseVisitor
         }
     }
 
-    /*
-    |---------------------------------------------------
-    | FOR
-    |---------------------------------------------------
-    */
-
-    public function visitForStmt($ctx)
+    // ----------------------------------------------------------------
+    // FOR — si hay error sintáctico en esa línea, no ejecutar
+    // ----------------------------------------------------------------
+    public function visitForStmt($ctx): void
     {
-        $this->pushScope();
+        if (!$ctx) return;
 
-        // FOR forClause block
+        $line = $ctx->start ? $ctx->start->getLine() : 0;
+
+        // Si ANTLR ya reportó error sintáctico en esta línea → omitir
+        if ($this->hasSyntaxErrorAt($line)) {
+            return;
+        }
+
+        // Detectar "for ; ; ; {}" — más de 2 puntos y coma en forClause
         if ($ctx->forClause()) {
-            $clause = $ctx->forClause();
+            $clause     = $ctx->forClause();
+            $semicolons = 0;
+            if ($clause) {
+                for ($i = 0; $i < $clause->getChildCount(); $i++) {
+                    if ($clause->getChild($i)->getText() === ';') $semicolons++;
+                }
+            }
+            if ($semicolons > 2) {
+                $this->runtimeErrors[] = [
+                    'tipo'        => 'Sintáctico',
+                    'descripcion' => 'for mal formado: demasiados separadores (;)',
+                    'linea'       => $line,
+                    'columna'     => $ctx->start ? $ctx->start->getCharPositionInLine() : 0,
+                ];
+                return;
+            }
+        }
 
-            /*
-            | La gramática es: (simpleStmt)? ';' (expression)? ';' (simpleStmt)?
-            | ANTLR indexa solo los nodos presentes, no las posiciones del texto.
-            | Por eso usamos getText() del forClause para detectar cuántos simpleStmt hay
-            | y en qué posición están, usando los hijos directos del forClause.
-            */
-            $initStmt = null;
-            $postStmt = null;
-            $allSimple = $clause->simpleStmt();  // array de todos los simpleStmt presentes
+        $this->pushScope();
+        $maxIter = 100000;
 
-            // Detectar si el init está presente: el primer hijo del forClause es un simpleStmt
-            // (no un ';'). Si el primer hijo texto es ';', no hay init.
+        if ($ctx->forClause()) {
+            $clause     = $ctx->forClause();
+            $allSimple  = $clause->simpleStmt() ?? [];
             $firstChild = $clause->getChild(0);
-            $hasInit = ($firstChild !== null && $firstChild->getText() !== ';');
+            $lastChild  = $clause->getChild($clause->getChildCount() - 1);
+            $hasInit    = $firstChild && $firstChild->getText() !== ';';
+            $hasPost    = $lastChild  && $lastChild->getText()  !== ';';
 
-            if ($hasInit && count($allSimple) > 0) {
-                $initStmt = $allSimple[0];
-            }
-
-            // El post es el último simpleStmt, solo si el último hijo antes de EOF es simpleStmt
-            $lastChild = $clause->getChild($clause->getChildCount() - 1);
-            $hasPost = ($lastChild !== null && $lastChild->getText() !== ';');
-
-            if ($hasPost) {
+            $initStmt = ($hasInit && count($allSimple) > 0) ? $allSimple[0] : null;
+            $postStmt = null;
+            if ($hasPost && count($allSimple) > 0) {
                 $postStmt = $allSimple[count($allSimple) - 1];
-                // Si init y post son el mismo nodo (solo hay 1 simpleStmt pero hay post)
-                // verificamos que no sea el mismo que el init
-                if ($hasInit && count($allSimple) === 1) {
-                    $postStmt = null; // solo había init, no post
-                }
+                if ($hasInit && count($allSimple) === 1) $postStmt = null;
             }
 
-            // Ejecutar init
-            if ($initStmt !== null) {
-                $this->visit($initStmt);
-            }
+            if ($initStmt) $this->safeVisit($initStmt);
 
-            while (true) {
-                // Condición
+            for ($iter = 0; $iter < $maxIter; $iter++) {
                 if ($clause->expression()) {
-                    $cond = $this->visit($clause->expression());
-                    if (!$cond) break;
+                    if (!$this->safeVisit($clause->expression())) break;
                 }
-
-                $this->visit($ctx->block());
-
-                if ($this->breakSignal) {
-                    $this->breakSignal = false;
-                    break;
-                }
-                if ($this->continueSignal) {
-                    $this->continueSignal = false;
-                    // continua al post igualmente
-                }
-                if ($this->returnSignal) break;
-
-                // Post
-                if ($postStmt !== null) {
-                    $this->visit($postStmt);
-                }
+                $this->safeVisit($ctx->block());
+                if ($this->breakSignal)    { $this->breakSignal = false; break; }
+                if ($this->continueSignal) { $this->continueSignal = false; }
+                if ($this->returnSignal)   break;
+                if ($postStmt) $this->safeVisit($postStmt);
             }
 
-        // FOR expression block (while)
         } elseif ($ctx->expression()) {
-            while (true) {
-                $cond = $this->visit($ctx->expression());
-                if (!$cond) break;
-
-                $this->visit($ctx->block());
-
-                if ($this->breakSignal) {
-                    $this->breakSignal = false;
-                    break;
-                }
-                if ($this->continueSignal) {
-                    $this->continueSignal = false;
-                    continue;
-                }
-                if ($this->returnSignal) break;
+            for ($iter = 0; $iter < $maxIter; $iter++) {
+                if (!$this->safeVisit($ctx->expression())) break;
+                $this->safeVisit($ctx->block());
+                if ($this->breakSignal)    { $this->breakSignal = false; break; }
+                if ($this->continueSignal) { $this->continueSignal = false; continue; }
+                if ($this->returnSignal)   break;
             }
 
-        // FOR block (loop infinito)
         } else {
-            while (true) {
-                $this->visit($ctx->block());
-
-                if ($this->breakSignal) {
-                    $this->breakSignal = false;
-                    break;
-                }
-                if ($this->continueSignal) {
-                    $this->continueSignal = false;
-                    continue;
-                }
-                if ($this->returnSignal) break;
+            for ($iter = 0; $iter < $maxIter; $iter++) {
+                $this->safeVisit($ctx->block());
+                if ($this->breakSignal)    { $this->breakSignal = false; break; }
+                if ($this->continueSignal) { $this->continueSignal = false; continue; }
+                if ($this->returnSignal)   break;
             }
         }
 
         $this->popScope();
     }
 
-    /*
-    |---------------------------------------------------
-    | CONTROL DE FLUJO
-    |---------------------------------------------------
-    */
+    // ----------------------------------------------------------------
+    // CONTROL DE FLUJO
+    // ----------------------------------------------------------------
+    public function visitBreakStmt($ctx):    void { $this->breakSignal    = true; }
+    public function visitContinueStmt($ctx): void { $this->continueSignal = true; }
 
-    public function visitBreakStmt($ctx)
+    public function visitReturnStmt($ctx): void
     {
-        $this->breakSignal = true;
-    }
-
-    public function visitContinueStmt($ctx)
-    {
-        $this->continueSignal = true;
-    }
-
-    public function visitReturnStmt($ctx)
-    {
+        if (!$ctx) return;
         if ($ctx->exp_list()) {
             $exps = $ctx->exp_list()->expression();
             if (count($exps) === 1) {
-                $this->returnValue = $this->visit($exps[0]);
+                $this->returnValue = $this->safeVisit($exps[0]);
             } else {
-                // Múltiple retorno: devolver array indexado
                 $values = [];
-                foreach ($exps as $exp) {
-                    $values[] = $this->visit($exp);
-                }
+                foreach ($exps as $exp) $values[] = $this->safeVisit($exp);
                 $this->returnValue = $values;
             }
         } else {
             $this->returnValue = null;
         }
-
         $this->returnSignal = true;
     }
 
-    /*
-    |---------------------------------------------------
-    | PRINTLN
-    |---------------------------------------------------
-    */
-
-    public function visitFmtPrintlnCall($ctx)
+    // ----------------------------------------------------------------
+    // PRINTLN
+    // ----------------------------------------------------------------
+    public function visitFmtPrintlnCall($ctx): void
     {
+        if (!$ctx) return;
         $values = [];
-
         if ($ctx->exp_list()) {
             foreach ($ctx->exp_list()->expression() as $exp) {
-                $val = $this->visit($exp);
-                $values[] = $this->formatValue($val);
+                $values[] = $this->formatValue($this->safeVisit($exp));
             }
         }
-
-        $this->output .= implode(" ", $values) . "\n"; // sin cambios
+        $this->output .= implode(' ', $values) . "\n";
     }
 
-    /*
-    |---------------------------------------------------
-    | BUILT-IN FUNCTIONS
-    |---------------------------------------------------
-    */
-
+    // ----------------------------------------------------------------
+    // BUILT-INS
+    // ----------------------------------------------------------------
     public function visitBuiltinCall($ctx)
     {
+        if (!$ctx) return null;
         $first = $ctx->getChild(0)->getText();
 
-        // len(expr)
         if ($first === 'len') {
-            $val = $this->visit($ctx->expression(0));
-            if (is_array($val))  return count($val);
-            if (is_string($val)) return strlen($val);
-            return 0;
+            $val = $this->safeVisit($ctx->expression(0));
+            return is_array($val) ? count($val) : (is_string($val) ? strlen($val) : 0);
         }
-
-        // now()
-        if ($first === 'now') {
-            return date('Y-m-d H:i:s');
-        }
-
-        // substr(str, start, length)
+        if ($first === 'now') return date('Y-m-d H:i:s');
         if ($first === 'substr') {
-            $str    = $this->visit($ctx->expression(0));
-            $start  = $this->visit($ctx->expression(1));
-            $length = $this->visit($ctx->expression(2));
-            return substr((string)$str, (int)$start, (int)$length);
+            return substr(
+                (string)$this->safeVisit($ctx->expression(0), ''),
+                (int)$this->safeVisit($ctx->expression(1), 0),
+                (int)$this->safeVisit($ctx->expression(2), 0)
+            );
         }
-
-        // typeOf(expr)
         if ($first === 'typeOf') {
-            $val = $this->visit($ctx->expression(0));
-            // Intentar obtener el tipo almacenado si la expresión es un identificador
-            $storedType = null;
+            $val        = $this->safeVisit($ctx->expression(0));
             $exprText   = trim($ctx->expression(0)->getText());
-            if (preg_match('/^\w+$/', $exprText)) {
-                $storedType = $this->getVarType($exprText);
-            }
+            $storedType = preg_match('/^\w+$/', $exprText) ? $this->getVarType($exprText) : null;
             return $this->typeOf($val, $storedType);
         }
-
         return null;
     }
 
-    /*
-    |---------------------------------------------------
-    | EXPRESSIONS
-    |---------------------------------------------------
-    */
-
+    // ----------------------------------------------------------------
+    // EXPRESSIONS
+    // ----------------------------------------------------------------
     public function visitExprStmt($ctx)
     {
-        return $this->visit($ctx->expression());
+        if (!$ctx || !$ctx->expression()) return null;
+        return $this->safeVisit($ctx->expression());
     }
 
     public function visitExpression($ctx)
     {
-        return $this->visit($ctx->logicalOrExpr());
+        if (!$ctx || !$ctx->logicalOrExpr()) return null;
+        return $this->safeVisit($ctx->logicalOrExpr());
     }
 
     public function visitLogicalOrExpr($ctx)
     {
-        $result = $this->visit($ctx->logicalAndExpr(0));
-
+        if (!$ctx) return null;
+        $result = $this->safeVisit($ctx->logicalAndExpr(0));
         for ($i = 1; $i < count($ctx->logicalAndExpr()); $i++) {
-            $right  = $this->visit($ctx->logicalAndExpr($i));
-            $result = $result || $right;
+            $result = $result || $this->safeVisit($ctx->logicalAndExpr($i));
         }
-
         return $result;
     }
 
     public function visitLogicalAndExpr($ctx)
     {
-        $result = $this->visit($ctx->equalityExpr(0));
-
+        if (!$ctx) return null;
+        $result = $this->safeVisit($ctx->equalityExpr(0));
         for ($i = 1; $i < count($ctx->equalityExpr()); $i++) {
-            $right  = $this->visit($ctx->equalityExpr($i));
-            $result = $result && $right;
+            $result = $result && $this->safeVisit($ctx->equalityExpr($i));
         }
-
         return $result;
     }
 
     public function visitEqualityExpr($ctx)
     {
-        $result = $this->visit($ctx->relationalExpr(0));
-
+        if (!$ctx) return null;
+        $result = $this->safeVisit($ctx->relationalExpr(0));
         for ($i = 1; $i < count($ctx->relationalExpr()); $i++) {
-            $right = $this->visit($ctx->relationalExpr($i));
+            $right = $this->safeVisit($ctx->relationalExpr($i));
             $op    = $ctx->getChild(($i * 2) - 1)->getText();
-
-            // nil comparado con cualquier cosa devuelve nil (<nil>)
-            if (is_null($result) || is_null($right)) {
-                $result = null;
-                continue;
-            }
-
+            if (is_null($result) || is_null($right)) { $result = null; continue; }
             if ($op === '==') $result = ($result == $right);
             if ($op === '!=') $result = ($result != $right);
         }
-
         return $result;
     }
 
     public function visitRelationalExpr($ctx)
     {
-        $result = $this->visit($ctx->additiveExpr(0));
-
+        if (!$ctx) return null;
+        $result = $this->safeVisit($ctx->additiveExpr(0));
         for ($i = 1; $i < count($ctx->additiveExpr()); $i++) {
-            $right = $this->visit($ctx->additiveExpr($i));
+            $right = $this->safeVisit($ctx->additiveExpr($i));
             $op    = $ctx->getChild(($i * 2) - 1)->getText();
-
-            if ($op === '>')  $result = ($result > $right);
-            if ($op === '>=') $result = ($result >= $right);
-            if ($op === '<')  $result = ($result < $right);
-            if ($op === '<=') $result = ($result <= $right);
+            if ($op === '>')  $result = $result > $right;
+            if ($op === '>=') $result = $result >= $right;
+            if ($op === '<')  $result = $result < $right;
+            if ($op === '<=') $result = $result <= $right;
         }
-
         return $result;
     }
 
     public function visitAdditiveExpr($ctx)
     {
-        $result = $this->visit($ctx->multiplicativeExpr(0));
-
+        if (!$ctx) return null;
+        $result = $this->safeVisit($ctx->multiplicativeExpr(0));
         for ($i = 1; $i < count($ctx->multiplicativeExpr()); $i++) {
-            $right = $this->visit($ctx->multiplicativeExpr($i));
+            $right = $this->safeVisit($ctx->multiplicativeExpr($i));
             $op    = $ctx->getChild(($i * 2) - 1)->getText();
-
             if ($op === '+') $result += $right;
             if ($op === '-') $result -= $right;
         }
-
         return $result;
     }
 
     public function visitMultiplicativeExpr($ctx)
     {
-        $result = $this->visit($ctx->unaryExpr(0));
-
+        if (!$ctx) return null;
+        $result = $this->safeVisit($ctx->unaryExpr(0));
         for ($i = 1; $i < count($ctx->unaryExpr()); $i++) {
-            $right = $this->visit($ctx->unaryExpr($i));
+            $right = $this->safeVisit($ctx->unaryExpr($i));
             $op    = $ctx->getChild(($i * 2) - 1)->getText();
-
             if ($op === '*') $result *= $right;
-            if ($op === '/') $result = $right != 0 ? intdiv((int)$result, (int)$right) : 0;
+            if ($op === '/') $result = ($right != 0) ? intdiv((int)$result, (int)$right) : 0;
             if ($op === '%') $result %= $right;
         }
-
         return $result;
     }
 
     public function visitUnaryExpr($ctx)
     {
+        if (!$ctx) return null;
         if ($ctx->getChildCount() == 2) {
             $op    = $ctx->getChild(0)->getText();
-            $value = $this->visit($ctx->unaryExpr());
-
+            $value = $this->safeVisit($ctx->unaryExpr());
             if ($op === '-') return -$value;
             if ($op === '!') return !$value;
-
             return $value;
         }
-
-        return $this->visit($ctx->primaryExpr());
+        return $this->safeVisit($ctx->primaryExpr());
     }
 
-    /*
-    |---------------------------------------------------
-    | PRIMARY EXPR
-    |---------------------------------------------------
-    */
-
+    // ----------------------------------------------------------------
+    // PRIMARY EXPR
+    // ----------------------------------------------------------------
     public function visitPrimaryExpr($ctx)
     {
+        if (!$ctx) return null;
         $childCount = $ctx->getChildCount();
 
-        // Acceso a arreglo: primaryExpr '[' expression ']'
-        // La gramática lo produce como (primaryExpr '[' expression ']')
         if ($childCount === 4 && $ctx->getChild(1)->getText() === '[') {
-            $arr   = $this->visit($ctx->primaryExpr());
-            $index = (int)$this->visit($ctx->expression());
-            if (is_array($arr) && array_key_exists($index, $arr)) {
-                return $arr[$index];
-            }
-            // índice fuera de rango => valor por defecto es 0
-            return 0;
+            $arr   = $this->safeVisit($ctx->primaryExpr());
+            $index = (int)$this->safeVisit($ctx->expression(), 0);
+            return (is_array($arr) && array_key_exists($index, $arr)) ? $arr[$index] : 0;
         }
 
-        // Llamada a función: primaryExpr '(' exp_list? ')'
         if ($childCount >= 3 && $ctx->getChild(1)->getText() === '(') {
-            $name = $ctx->primaryExpr()->getText();
+            $name    = $ctx->primaryExpr()->getText();
             $args    = [];
-            $argRefs = []; // nombres de variables pasadas por referencia (&var)
-
+            $argRefs = [];
             if ($ctx->exp_list()) {
                 foreach ($ctx->exp_list()->expression() as $i => $exp) {
-                    $expText = $exp->getText();
-                    // Detectar paso por referencia: &varName
-                    if (str_starts_with($expText, '&')) {
-                        $varName    = substr($expText, 1);
-                        $args[]     = $this->getVar($varName); // pasar el valor actual
-                        $argRefs[$i] = $varName;               // guardar nombre para writeback
+                    $text = $exp->getText();
+                    if (str_starts_with($text, '&')) {
+                        $varName     = substr($text, 1);
+                        $args[]      = $this->getVar($varName);
+                        $argRefs[$i] = $varName;
                     } else {
-                        $args[] = $this->visit($exp);
+                        $args[] = $this->safeVisit($exp);
                     }
                 }
             }
             return $this->callFunction($name, $args, $argRefs);
         }
 
-        // fmt.Println(...)
-        if ($ctx->fmtPrintlnCall()) {
-            return $this->visit($ctx->fmtPrintlnCall());
-        }
-
-        // Built-in call
-        if ($ctx->builtinCall()) {
-            return $this->visit($ctx->builtinCall());
-        }
-
-        // Array literal  — tiene que ir ANTES de literal e IDENTIFIER
-        if ($ctx->arrayLiteral()) {
-            return $this->visit($ctx->arrayLiteral());
-        }
-
-        // Literal
-        if ($ctx->literal()) {
-            return $this->visit($ctx->literal());
-        }
-
-        // Identificador
-        if ($ctx->IDENTIFIER()) {
-            $id = $ctx->IDENTIFIER()->getText();
-            return $this->getVar($id);
-        }
-
-        // Expresión entre paréntesis
-        if ($ctx->expression()) {
-            return $this->visit($ctx->expression());
-        }
-
-        // NIL
-        if ($ctx->NIL()) {
-            return null;
-        }
+        if ($ctx->fmtPrintlnCall()) return $this->safeVisit($ctx->fmtPrintlnCall());
+        if ($ctx->builtinCall())    return $this->safeVisit($ctx->builtinCall());
+        if ($ctx->arrayLiteral())   return $this->safeVisit($ctx->arrayLiteral());
+        if ($ctx->literal())        return $this->safeVisit($ctx->literal());
+        if ($ctx->IDENTIFIER())     return $this->getVar($ctx->IDENTIFIER()->getText());
+        if ($ctx->expression())     return $this->safeVisit($ctx->expression());
+        if ($ctx->NIL())            return null;
 
         return null;
     }
 
-    /*
-    |---------------------------------------------------
-    | SLICE LITERAL HELPER
-    | Parsea manualmente []tipo{v1,v2,...} cuando la gramática
-    | no lo reconoce como arrayLiteral por falta de tamaño.
-    |---------------------------------------------------
-    */
+    // ----------------------------------------------------------------
+    // ARRAY LITERAL
+    // ----------------------------------------------------------------
     private function tryParseSliceLiteral($text)
     {
-        // Detectar patrón []tipo{...}  o [N]tipo{...}
-        if (!preg_match('/^\[(\d*)\](\w+)\{(.*)\}$/s', trim($text), $m)) {
-            return null;
-        }
+        if (!preg_match('/^\[(\d*)\](\w+)\{(.*)\}$/s', trim($text), $m)) return null;
         $inner = trim($m[3]);
         if ($inner === '') return [];
-
-        // Separar elementos por coma (simplificado, funciona para literales planos)
-        $parts = array_map('trim', explode(',', $inner));
         $result = [];
-        foreach ($parts as $part) {
+        foreach (array_map('trim', explode(',', $inner)) as $part) {
             if ($part === '') continue;
-            if (is_numeric($part) && strpos($part, '.') !== false) {
-                $result[] = floatval($part);
-            } elseif (is_numeric($part)) {
-                $result[] = intval($part);
-            } elseif ($part === 'true') {
-                $result[] = true;
-            } elseif ($part === 'false') {
-                $result[] = false;
-            } else {
-                $result[] = trim($part, '"\'');
-            }
+            if (is_numeric($part) && str_contains($part, '.')) $result[] = floatval($part);
+            elseif (is_numeric($part)) $result[] = intval($part);
+            elseif ($part === 'true')  $result[] = true;
+            elseif ($part === 'false') $result[] = false;
+            else $result[] = trim($part, '"\'');
         }
         return $result;
     }
 
     public function visitArrayLiteral($ctx)
     {
+        if (!$ctx) return [];
         $elements = [];
-
         if ($ctx->elementList()) {
             foreach ($ctx->elementList()->element() as $el) {
+                if (!$el) continue;
                 if ($el->arrayLiteral()) {
-                    // Fila con tipo explícito: [2]int32{1,0}
-                    $elements[] = $this->visit($el->arrayLiteral());
+                    $elements[] = $this->safeVisit($el->arrayLiteral());
                 } elseif ($el->getChildCount() >= 2 && $el->getChild(0)->getText() === '{') {
-                    // Fila inline sin tipo: {1, 0} — alternativa '{' elementList '}'
                     $row = [];
                     if (method_exists($el, 'elementList') && $el->elementList()) {
                         foreach ($el->elementList()->element() as $inner) {
-                            $row[] = $this->visit($inner->expression());
+                            if ($inner && $inner->expression())
+                                $row[] = $this->safeVisit($inner->expression());
                         }
                     }
                     $elements[] = $row;
                 } else {
-                    $elements[] = $this->visit($el->expression());
+                    $elements[] = $this->safeVisit($el->expression());
                 }
             }
         }
-
         return $elements;
     }
 
-    /*
-    |---------------------------------------------------
-    | LITERALS
-    |---------------------------------------------------
-    */
-
+    // ----------------------------------------------------------------
+    // LITERALS
+    // ----------------------------------------------------------------
     public function visitLiteral($ctx)
     {
-        if ($ctx->INT_LITERAL())    return intval($ctx->getText());
-        if ($ctx->FLOAT_LITERAL())  return floatval($ctx->getText());
+        if (!$ctx) return null;
+        if ($ctx->INT_LITERAL())   return intval($ctx->getText());
+        if ($ctx->FLOAT_LITERAL()) return floatval($ctx->getText());
         if ($ctx->STRING_LITERAL()) {
-            $raw = substr($ctx->getText(), 1, -1); // quitar comillas
-            // Procesar secuencias de escape
-            return str_replace(
-                ['\\n', '\\t', '\\r', '\\"', '\\\\'],
-                ["\n",  "\t",  "\r",  '"',   "\\"],
-                $raw
-            );
+            $raw = substr($ctx->getText(), 1, -1);
+            return str_replace(['\\n','\\t','\\r','\\"','\\\\'], ["\n","\t","\r",'"',"\\"], $raw);
         }
         if ($ctx->RUNE_LITERAL()) {
             $inner = substr($ctx->getText(), 1, -1);
             if (strlen($inner) >= 2 && $inner[0] === '\\') {
-                switch ($inner[1]) {
-                    case 'n':  return 10;
-                    case 't':  return 9;
-                    case 'r':  return 13;
-                    case '0':  return 0;
-                    case '\\': return 92;
-                    case '\'': return 39;
-                    default:   return ord($inner[1]);
-                }
+                return match($inner[1]) {
+                    'n' => 10, 't' => 9, 'r' => 13, '0' => 0, '\\' => 92, "'" => 39,
+                    default => ord($inner[1]),
+                };
             }
             return ord($inner[0]);
         }
-        if ($ctx->TRUE())           return true;
-        if ($ctx->FALSE())          return false;
-
+        if ($ctx->TRUE())  return true;
+        if ($ctx->FALSE()) return false;
         return null;
     }
 
-    /*
-    |---------------------------------------------------
-    | HELPERS
-    |---------------------------------------------------
-    */
-
-    /**
-     * Castea un valor PHP al tipo OLC correspondiente.
-     */
+    // ----------------------------------------------------------------
+    // HELPERS
+    // ----------------------------------------------------------------
     private function castToType($value, $type)
     {
         if ($type === null) return $value;
-
-        switch ($type) {
-            case 'int32':   return intval($value);
-            case 'float32': return floatval($value);
-            case 'bool':    return (bool)$value;
-            case 'string':  return (string)$value;
-            case 'rune':    return is_string($value) ? $value[0] : chr((int)$value);
-            default:        return $value; // arrays u otros tipos compuestos
-        }
+        return match($type) {
+            'int32'   => intval($value),
+            'float32' => floatval($value),
+            'bool'    => (bool)$value,
+            'string'  => (string)$value,
+            'rune'    => is_string($value) ? ord($value[0]) : (int)$value,
+            default   => $value,
+        };
     }
 
-    /**
-     * Valor por defecto segun el tipo.
-     * Soporta tipos simples y arrays como [5]int32 o [3][3]int32.
-     */
     private function defaultValue($type)
     {
         if ($type === null) return null;
-
-        // Tipo array: [N]innerType  (e.g. [5]int32, [3][3]int32)
         if (preg_match('/^\[(\d+)\](.+)$/', $type, $m)) {
-            $size      = (int)$m[1];
-            $innerType = $m[2];
             $arr = [];
-            for ($i = 0; $i < $size; $i++) {
-                $arr[$i] = $this->defaultValue($innerType);
-            }
+            for ($i = 0; $i < (int)$m[1]; $i++) $arr[$i] = $this->defaultValue($m[2]);
             return $arr;
         }
-
-        switch ($type) {
-            case 'int32':   return 0;
-            case 'float32': return 0.0;
-            case 'bool':    return false;
-            case 'string':  return "";
-            case 'rune':    return 0;  // rune por defecto es el código 0, no el char nulo
-            default:        return null;
-        }
+        return match($type) {
+            'int32'   => 0,  'float32' => 0.0, 'bool' => false,
+            'string'  => '', 'rune'    => 0,   default => null,
+        };
     }
 
-    /**
-     * Devuelve el tipo OLC de un valor, con soporte para tipo almacenado.
-     */
-    private function typeOf($value, $storedType = null)
+    private function typeOf($value, $storedType = null): string
     {
-        // Si hay tipo almacenado explícito, usarlo
         if ($storedType !== null) return $storedType;
-
-        // Inferir desde el valor PHP
         return $this->inferType($value);
     }
 
-    /**
-     * Infiere el tipo OLC desde un valor PHP (para declaraciones cortas).
-     * Usa las reglas de Go: literales int → "int", float → "float64".
-     */
-    private function inferType($value)
+    private function inferType($value): string
     {
-        if (is_bool($value))  return 'bool';
-        if (is_int($value))   return 'int';       // sin tipo explícito → int (no int32)
-        if (is_float($value)) return 'float64';   // sin tipo explícito → float64
+        if (is_bool($value))   return 'bool';
+        if (is_int($value))    return 'int';
+        if (is_float($value))  return 'float64';
         if (is_string($value)) return 'string';
         if (is_array($value))  return 'array';
         return 'nil';
     }
 
-    /**
-     * Infiere el tipo desde el nodo de expresión y el valor evaluado.
-     * Para arrayLiteral, extrae el tipo del texto: [3]int32{...} → "[3]int32"
-     */
-    private function inferTypeFromExpr($expCtx, $value)
+    private function inferTypeFromExpr($expCtx, $value): string
     {
         $text = trim($expCtx->getText());
-
-        // arrayLiteral: empieza con '[' y tiene '{' → extraer tipo
-        if (preg_match('/^(\[\d*\]\w+)\{/', $text, $m)) {
-            return $m[1]; // e.g. "[3]int32", "[]int32"
-        }
-
+        if (preg_match('/^(\[\d*\]\w+)\{/', $text, $m)) return $m[1];
         return $this->inferType($value);
     }
 
-    /**
-     * Formatea un valor para mostrarlo en fmt.Println.
-     */
-    private function formatValue($val)
+    private function formatValue($val): string
     {
         if (is_bool($val))  return $val ? 'true' : 'false';
         if (is_null($val))  return '<nil>';

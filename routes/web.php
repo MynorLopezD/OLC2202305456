@@ -9,3 +9,5 @@ Route::post('/analizar',
 Route::get('/', function () {
     return view('editor');
 });
+
+Route::get('/reportes', [CompilerController::class, 'reportes'])->name('reportes');
